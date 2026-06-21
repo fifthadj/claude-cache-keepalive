@@ -1,5 +1,6 @@
 # claude-cache-keepalive (`cwarm`)
 
+[![CI](https://github.com/fifthadj/claude-cache-keepalive/actions/workflows/test.yml/badge.svg)](https://github.com/fifthadj/claude-cache-keepalive/actions/workflows/test.yml)
 [![npm version](https://img.shields.io/npm/v/claude-cache-keepalive.svg)](https://www.npmjs.com/package/claude-cache-keepalive)
 [![license: MIT](https://img.shields.io/npm/l/claude-cache-keepalive.svg)](./LICENSE)
 
