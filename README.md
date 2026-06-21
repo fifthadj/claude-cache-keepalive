@@ -1,5 +1,8 @@
 # claude-cache-keepalive (`cwarm`)
 
+[![npm version](https://img.shields.io/npm/v/claude-cache-keepalive.svg)](https://www.npmjs.com/package/claude-cache-keepalive)
+[![license: MIT](https://img.shields.io/npm/l/claude-cache-keepalive.svg)](./LICENSE)
+
 Keep [Claude Code](https://claude.com/claude-code)'s **prompt cache warm while you're idle**, so coming back to a session you stepped away from doesn't pay a full cache‑miss.
 
 It runs `claude` inside a PTY it controls (via [node-pty](https://github.com/microsoft/node-pty)) and, when you've been idle past your plan's cache TTL, injects a tiny keepalive so the cache stays warm. Because injection is an in‑process PTY write, **it keeps working when the window is unfocused, minimized, or in the background** — only closing the window stops it.
