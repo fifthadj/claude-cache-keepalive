@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { defaultClaudeDir, planParams, detectPlan, decideInject } from './keepalive.mjs';
+import { defaultClaudeDir, planParams, detectPlan, decideInject, transcriptIdleMs } from './keepalive.mjs';
 
 const require = createRequire(import.meta.url);
 const isWin = process.platform === 'win32';
@@ -48,10 +48,11 @@ export function startHost(opts = {}) {
 
   // ---- 透明 I/O 多工 ----
   // 直接寫 Buffer（純位元組轉送）：UTF-8 多位元組（中文等）才不會被重編碼弄壞。
-  let lastInput = Date.now();
+  // 注意：閒置判斷改看 transcript mtime（距上次「訊息」多久），不再用 stdin 計時——
+  // 終端輸入（捲動／讀回覆／打到一半沒送出）不會刷新 cache，拿來計時會誤判成「使用者還在忙」。
   if (process.stdin.isTTY) { try { process.stdin.setRawMode(true); } catch {} }
   process.stdin.resume();
-  process.stdin.on('data', (d) => { lastInput = Date.now(); ptyProc.write(d); });
+  process.stdin.on('data', (d) => { ptyProc.write(d); });
   ptyProc.onData((d) => process.stdout.write(d));
   process.stdout.on('resize', () => {
     try { ptyProc.resize(process.stdout.columns || 80, process.stdout.rows || 24); } catch {}
@@ -71,10 +72,11 @@ export function startHost(opts = {}) {
     const plan = detectPlan(claudeDir);
     const { ttl, idleThreshold } = planParams(plan, overrides);
     const now = Date.now();
-    if (decideInject({ now, lastInput, lastFire, idleThreshold, ttl, disabled: fs.existsSync(DISABLE) })) {
+    const idleMs = transcriptIdleMs(claudeDir, process.cwd(), now);
+    if (decideInject({ now, idleMs, lastFire, idleThreshold, ttl, disabled: fs.existsSync(DISABLE) })) {
       ptyProc.write(msg + '\r');
       lastFire = now;
-      const idle = Math.round((now - lastInput) / 1000);
+      const idle = idleMs == null ? -1 : Math.round(idleMs / 1000);
       try { fs.appendFileSync(LOG, `${new Date().toISOString()} inject "${msg}" plan=${plan} idle=${idle}s\n`); } catch {}
     }
   }, tickMs);

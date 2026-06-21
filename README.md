@@ -39,7 +39,7 @@ It's transparent — type and use claude exactly as normal (no `Ctrl-b` prefix, 
 ## How it works
 
 - **PTY host** — `cwarm` spawns `claude` inside a pseudo‑terminal it owns and transparently pipes your keyboard ↔ claude ↔ screen (and window resizes). This is the same approach tmux / expect / VS Code's terminal use, and the only robust way to inject input into a terminal program.
-- **Idle detection** — idle = time since your last keystroke. Self‑contained, no external files. When you step away, idle grows; when you type, it resets.
+- **Idle detection** — idle = time since your last **message**, measured from the newest transcript file under `~/.claude/projects/`. This is what actually governs cache age: scrolling, arrow‑key reading, or a half‑typed prompt are terminal input but don't refresh the cache, so they must *not* count as activity. (Earlier versions timed keystrokes, which let the cache go cold while you were reading.)
 - **Plan‑aware** — reads your plan from `~/.claude/.credentials.json`:
   - **Max** → cache TTL 1 h → inject after ~58 min idle, cooldown 1 h.
   - **Pro** → cache TTL 5 min → inject after ~4 min idle, cooldown 5 min.
