@@ -1,0 +1,41 @@
+{
+  "name": "claude-cache-keepalive",
+  "version": "0.1.0",
+  "description": "Keep Claude Code's prompt cache warm while idle, by running claude inside a PTY host and injecting a tiny keepalive when you step away. Cross-platform, no tmux required.",
+  "type": "module",
+  "bin": {
+    "cwarm": "src/cli.mjs"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "author": "fifthadj",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fifthadj/claude-cache-keepalive.git"
+  },
+  "homepage": "https://github.com/fifthadj/claude-cache-keepalive#readme",
+  "bugs": {
+    "url": "https://github.com/fifthadj/claude-cache-keepalive/issues"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "prompt-cache",
+    "keepalive",
+    "pty",
+    "node-pty"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "node-pty": "^1.0.0"
+  }
+}
