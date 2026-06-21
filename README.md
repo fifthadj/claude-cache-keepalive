@@ -101,6 +101,14 @@ Environment variables (mostly for testing / advanced use):
 - **選配 statusline**（顯示 `♻️ cache 58m12s` 倒數；會先備份、包裝既有 statusline、可一鍵還原）：`cwarm setup` / `cwarm setup --remove`
 - **限制**：不能 detach（關視窗＝結束，但縮小／背景照常保溫）。
 
+## Changelog
+
+### 0.1.2
+- **Fix:** idle is now measured from the newest transcript file's mtime — i.e. time since your last *message* — instead of keystrokes. Scrolling, arrow‑key reading, or a half‑typed prompt no longer reset the idle timer, so the keepalive actually fires while you're reading and the cache stops going cold. Adds `encodeProjectDir` / `transcriptMtimeMs` / `transcriptIdleMs`.
+
+### 0.1.0
+- Initial release. (0.1.1 was a version‑only bump and was never published to npm.)
+
 ## License
 
 MIT
