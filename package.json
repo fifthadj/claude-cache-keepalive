@@ -1,6 +1,6 @@
 {
   "name": "claude-cache-keepalive",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Keep Claude Code's prompt cache warm while idle, by running claude inside a PTY host and injecting a tiny keepalive when you step away. Cross-platform, no tmux required.",
   "type": "module",
   "bin": {
