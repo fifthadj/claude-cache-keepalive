@@ -104,6 +104,9 @@ Environment variables (mostly for testing / advanced use):
 
 ## Changelog
 
+### 0.1.4
+- **Fix:** the terminal could be left unusable after `/exit` or Ctrl‑C (keystrokes garbled / no usable input). The PTY host now restores the terminal on every exit path: it emits an explicit reset (disabling alt‑screen, bracketed‑paste, mouse, cursor‑hide, and — critically on Windows — `win32‑input‑mode` `?9001` and focus‑reporting `?1004`, which otherwise make the shell receive keystrokes as unparseable `ESC[…_` packets) and flushes stdout before exiting. Adds a `SIGINT` handler that forwards `0x03` to claude instead of letting the host be killed before cleanup, plus `SIGHUP`/`exit` safety restores.
+
 ### 0.1.3
 - **Change:** the cache TTL is now **measured from the transcript** (`message.usage.cache_creation`'s `ephemeral_1h` / `ephemeral_5m` tokens) instead of being guessed from your subscription plan. A recent 1h write → 1h regime; only 5m writes (or no evidence) → 5m regime (conservative). This drops the `~/.claude/.credentials.json` read entirely and is correct even when a Pro account gets a 1h cache. Adds `transcriptPath` / `readTtlRegime` / `detectTtlRegime` / `regimeParams`; removes `detectPlan` / `planParams`.
 

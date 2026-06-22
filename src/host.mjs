@@ -83,17 +83,38 @@ export function startHost(opts = {}) {
   }, tickMs);
 
   // ---- 收尾 ----
-  function restore() {
+  // claude（TUI）會開 alt-screen / bracketed-paste / mouse / 隱藏游標等終端模式。正常 /exit 時它自己會還原，
+  // 但 (1) 被 Ctrl-C 中斷時來不及還原；(2) 在 onExit 內立刻 process.exit() 會跟 claude 最後一段輸出（含還原
+  // 序列）賽跑而把它截斷。任一情況都會讓真終端卡在這些模式 → 回到 shell 後「鍵盤輸入不正常」。
+  // 故 shutdown()：還原 raw mode + 主動補一份終端還原序列 + 等 stdout flush 再退出。
+  // 關鍵（Windows）：node-pty 啟動時對真終端開了 ?9001h(win32-input-mode) 與 ?1004h(focus reporting)，
+  // 若沒關掉，回到 shell 後終端會把每個鍵碼以 ESC[…_ 封包送出，readline 無法解析 → 鍵盤輸入全亂。
+  // ?2004=bracketed paste、?1000/1002/1003/1006=mouse、?25=cursor、?1049=alt-screen、?9001=win32-input、?1004=focus。
+  const RESET = '\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l\x1b[?9001l\x1b[?1004l\x1b[0m';
+  let exiting = false;
+  function shutdown(code) {
+    if (exiting) return;
+    exiting = true;
+    clearInterval(timer);
     try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch {}
     try { process.stdin.pause(); } catch {}
+    try { process.stdout.write(RESET, () => process.exit(code)); }
+    catch { process.exit(code); }
+    setTimeout(() => process.exit(code), 200).unref(); // 保險：flush callback 沒回也強制退出
   }
-  ptyProc.onExit(({ exitCode }) => {
-    clearInterval(timer);
-    restore();
-    process.exit(exitCode || 0); // node-pty 會卡住 event loop，必須主動退出
+  ptyProc.onExit(({ exitCode }) => shutdown(exitCode || 0)); // node-pty 會卡住 event loop，必須主動退出
+  // Windows：真主控台的 Ctrl-C 以 SIGINT 送到 host（claude 在獨立 ConPTY、收不到真主控台的 Ctrl-C），
+  // 轉成 0x03 寫進 pty 交給 claude 自己處理；不要讓 host 被預設行為直接殺掉（那會跳過終端還原 → 卡 raw mode）。
+  // Unix raw mode 下 Ctrl-C 是位元組(0x03)、不觸發 SIGINT，故此 handler 不影響 Unix。
+  process.on('SIGINT', () => { try { ptyProc.write('\x03'); } catch {} });
+  process.on('SIGTERM', () => shutdown(0));
+  process.on('SIGHUP', () => shutdown(0));
+  // 任何路徑退出都殺掉 pty，並盡力（同步）還原終端，作為最後保險。
+  process.on('exit', () => {
+    try { ptyProc.kill(); } catch {}
+    try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch {}
+    try { process.stdout.write(RESET); } catch {}
   });
-  process.on('exit', () => { try { ptyProc.kill(); } catch {} });
-  process.on('SIGTERM', () => { try { ptyProc.kill(); } catch {} process.exit(0); });
 
   return ptyProc;
 }
