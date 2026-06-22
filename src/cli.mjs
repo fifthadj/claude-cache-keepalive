@@ -27,8 +27,10 @@ Usage:
 Everything except the 'setup' subcommand is passed straight to claude
 (e.g. \`cwarm --version\`, \`cwarm resume\`, \`cwarm -p "..."\`).
 
-Keepalive only fires after you've been idle past the plan threshold
-(max ~58min / pro ~4min). Pause anytime:  touch ~/.claude/cwarm.disabled
+Keepalive only fires after you've been idle past the cache-TTL threshold.
+The TTL is auto-detected from the transcript's cache_creation (1h cache ->
+fire after ~58min idle; 5m cache -> ~4min), not guessed from your plan.
+Pause anytime:  touch ~/.claude/cwarm.disabled
 Log:  ~/.claude/cwarm-keepalive.log
 `);
 }

@@ -6,11 +6,11 @@
 
 Keep [Claude Code](https://claude.com/claude-code)'s **prompt cache warm while you're idle**, so coming back to a session you stepped away from doesn't pay a full cache‑miss.
 
-It runs `claude` inside a PTY it controls (via [node-pty](https://github.com/microsoft/node-pty)) and, when you've been idle past your plan's cache TTL, injects a tiny keepalive so the cache stays warm. Because injection is an in‑process PTY write, **it keeps working when the window is unfocused, minimized, or in the background** — only closing the window stops it.
+It runs `claude` inside a PTY it controls (via [node-pty](https://github.com/microsoft/node-pty)) and, when you've been idle past your cache's TTL, injects a tiny keepalive so the cache stays warm. Because injection is an in‑process PTY write, **it keeps working when the window is unfocused, minimized, or in the background** — only closing the window stops it.
 
 Cross‑platform, **no tmux required**. This is the missing piece for setups (Windows / Git Bash, plain terminals) where the usual tmux‑based keepalive isn't available.
 
-> ⚠️ **Honest note — this uses your usage/quota.** Keeping the cache warm means sending a small message (`hi`) when you go idle, which counts against your plan usage and leaves `hi` turns in the conversation. It only fires after a long idle (≈58 min on Max, ≈4 min on Pro) with a one‑TTL cooldown, so it's conservative — but it is opt‑in by design. If that trade‑off isn't for you, don't use it.
+> ⚠️ **Honest note — this uses your usage/quota.** Keeping the cache warm means sending a small message (`hi`) when you go idle, which counts against your plan usage and leaves `hi` turns in the conversation. It only fires after a long idle (≈58 min on a 1‑hour cache, ≈4 min on a 5‑minute cache) with a one‑TTL cooldown, so it's conservative — but it is opt‑in by design. If that trade‑off isn't for you, don't use it.
 
 ## Install
 
@@ -40,9 +40,10 @@ It's transparent — type and use claude exactly as normal (no `Ctrl-b` prefix, 
 
 - **PTY host** — `cwarm` spawns `claude` inside a pseudo‑terminal it owns and transparently pipes your keyboard ↔ claude ↔ screen (and window resizes). This is the same approach tmux / expect / VS Code's terminal use, and the only robust way to inject input into a terminal program.
 - **Idle detection** — idle = time since your last **message**, measured from the newest transcript file under `~/.claude/projects/`. This is what actually governs cache age: scrolling, arrow‑key reading, or a half‑typed prompt are terminal input but don't refresh the cache, so they must *not* count as activity. (Earlier versions timed keystrokes, which let the cache go cold while you were reading.)
-- **Plan‑aware** — reads your plan from `~/.claude/.credentials.json`:
-  - **Max** → cache TTL 1 h → inject after ~58 min idle, cooldown 1 h.
-  - **Pro** → cache TTL 5 min → inject after ~4 min idle, cooldown 5 min.
+- **TTL‑aware (measured, not guessed)** — the cache TTL is read straight from the transcript's `message.usage.cache_creation`, not inferred from your subscription:
+  - any recent turn wrote `ephemeral_1h_input_tokens` → **1 h cache** → inject after ~58 min idle, cooldown 1 h.
+  - only `ephemeral_5m_input_tokens` (or no evidence yet) → **5 min cache** (conservative) → inject after ~4 min idle, cooldown 5 min.
+  - This survives client‑version, env‑var and server‑flag changes that the plan string can't see (e.g. a Pro account can still get a 1 h cache).
 - **Focus/minimize independent** — injection is an in‑process `pty.write`, unrelated to window state. Only closing the window (ending the host process) stops it.
 
 ## Optional: cache‑countdown statusline
@@ -91,9 +92,9 @@ Environment variables (mostly for testing / advanced use):
 
 讓 [Claude Code](https://claude.com/claude-code) 的 **prompt cache 在你離開時保持溫熱**，回來時就不必再付一次完整的 cache‑miss。
 
-`cwarm` 把 `claude` 跑在自己控制的 PTY 裡；當你閒置超過方案的 cache TTL 時，注入一個極小的 keepalive 訊息讓 cache 不過期。因為注入是行程內部的 PTY 寫入，**視窗非焦點、縮小、在背景都照常運作**——只有關閉視窗才會停。跨平台、**不需要 tmux**。
+`cwarm` 把 `claude` 跑在自己控制的 PTY 裡；當你閒置超過 cache 的 TTL 時，注入一個極小的 keepalive 訊息讓 cache 不過期。因為注入是行程內部的 PTY 寫入，**視窗非焦點、縮小、在背景都照常運作**——只有關閉視窗才會停。跨平台、**不需要 tmux**。
 
-> ⚠️ **誠實說明**：保溫＝閒置時送一則小訊息（`hi`），會消耗你的方案用量、並在對話留下 `hi` 紀錄。只在長時間閒置後才觸發（Max 約 58 分、Pro 約 4 分）且有冷卻，屬保守設計、明確 opt‑in。不接受這個取捨就別用。
+> ⚠️ **誠實說明**：保溫＝閒置時送一則小訊息（`hi`），會消耗你的方案用量、並在對話留下 `hi` 紀錄。只在長時間閒置後才觸發（1h cache 約 58 分、5m cache 約 4 分）且有冷卻，屬保守設計、明確 opt‑in。不接受這個取捨就別用。
 
 - **安裝**：`npm install -g claude-cache-keepalive`
 - **使用**：`cwarm`（＝`claude --continue` 跑在保溫 host 裡；其餘參數原樣轉給 claude）
@@ -102,6 +103,9 @@ Environment variables (mostly for testing / advanced use):
 - **限制**：不能 detach（關視窗＝結束，但縮小／背景照常保溫）。
 
 ## Changelog
+
+### 0.1.3
+- **Change:** the cache TTL is now **measured from the transcript** (`message.usage.cache_creation`'s `ephemeral_1h` / `ephemeral_5m` tokens) instead of being guessed from your subscription plan. A recent 1h write → 1h regime; only 5m writes (or no evidence) → 5m regime (conservative). This drops the `~/.claude/.credentials.json` read entirely and is correct even when a Pro account gets a 1h cache. Adds `transcriptPath` / `readTtlRegime` / `detectTtlRegime` / `regimeParams`; removes `detectPlan` / `planParams`.
 
 ### 0.1.2
 - **Fix:** idle is now measured from the newest transcript file's mtime — i.e. time since your last *message* — instead of keystrokes. Scrolling, arrow‑key reading, or a half‑typed prompt no longer reset the idle timer, so the keepalive actually fires while you're reading and the cache stops going cold. Adds `encodeProjectDir` / `transcriptMtimeMs` / `transcriptIdleMs`.

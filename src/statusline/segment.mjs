@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { defaultClaudeDir, detectPlan } from '../keepalive.mjs';
+import { defaultClaudeDir, readTtlRegime, regimeParams } from '../keepalive.mjs';
 
 const claudeDir = defaultClaudeDir();
 const ORIG = path.join(claudeDir, 'cwarm-statusline-orig.json');
@@ -13,14 +13,14 @@ function readStdin() {
   try { return fs.readFileSync(0, 'utf8'); } catch { return ''; }
 }
 
-// cache 倒數段：用 transcript mtime 當 idle、plan 決定 TTL（max 1h / pro 5min）。
+// cache 倒數段：用 transcript mtime 當 idle、用 transcript 實測的 cache_creation 判 TTL（1h / 5m）。
 function cacheSegment(payload) {
   const tp = payload?.transcript_path;
   if (!tp) return '';
   let mtimeMs;
   try { mtimeMs = fs.statSync(tp).mtimeMs; } catch { return ''; }
-  const plan = detectPlan(claudeDir);
-  const ttl = plan === 'max' ? 3600 : 300;
+  const { ttl } = regimeParams(readTtlRegime(tp));   // 'long'→3600 / 'short'|null→300
+
   const idle = Math.max(0, Math.floor((Date.now() - mtimeMs) / 1000));
   const rem = ttl - idle;
   if (rem <= 0) return `\u{1F534} cache ${Math.floor(idle / 60)}m`;      // 🔴 已冷

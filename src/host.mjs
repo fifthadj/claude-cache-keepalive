@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { defaultClaudeDir, planParams, detectPlan, decideInject, transcriptIdleMs } from './keepalive.mjs';
+import { defaultClaudeDir, regimeParams, detectTtlRegime, decideInject, transcriptIdleMs } from './keepalive.mjs';
 
 const require = createRequire(import.meta.url);
 const isWin = process.platform === 'win32';
@@ -69,15 +69,16 @@ export function startHost(opts = {}) {
 
   let lastFire = 0;
   const timer = setInterval(() => {
-    const plan = detectPlan(claudeDir);
-    const { ttl, idleThreshold } = planParams(plan, overrides);
+    const cwd = process.cwd();
+    const regime = detectTtlRegime(claudeDir, cwd);           // 從 transcript 實測 1h/5m，不再猜方案
+    const { ttl, idleThreshold } = regimeParams(regime, overrides);
     const now = Date.now();
-    const idleMs = transcriptIdleMs(claudeDir, process.cwd(), now);
+    const idleMs = transcriptIdleMs(claudeDir, cwd, now);
     if (decideInject({ now, idleMs, lastFire, idleThreshold, ttl, disabled: fs.existsSync(DISABLE) })) {
       ptyProc.write(msg + '\r');
       lastFire = now;
       const idle = idleMs == null ? -1 : Math.round(idleMs / 1000);
-      try { fs.appendFileSync(LOG, `${new Date().toISOString()} inject "${msg}" plan=${plan} idle=${idle}s\n`); } catch {}
+      try { fs.appendFileSync(LOG, `${new Date().toISOString()} inject "${msg}" regime=${regime ?? 'unknown'} idle=${idle}s\n`); } catch {}
     }
   }, tickMs);
 

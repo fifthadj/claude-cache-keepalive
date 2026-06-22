@@ -4,59 +4,64 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  decideInject, planParams, PLAN_PARAMS,
-  encodeProjectDir, transcriptIdleMs,
+  decideInject, regimeParams, REGIME_PARAMS,
+  encodeProjectDir, transcriptIdleMs, transcriptPath,
+  readTtlRegime, detectTtlRegime,
 } from '../src/keepalive.mjs';
 
 const NOW = 1_000_000_000_000;
-const MAX = planParams('max'); // { ttl:3600, idleThreshold:3480 }
-const PRO = planParams('pro'); // { ttl:300,  idleThreshold:240 }
+const LONG = regimeParams('long'); // { ttl:3600, idleThreshold:3480 }
+const SHORT = regimeParams('short'); // { ttl:300,  idleThreshold:240 }
 const ms = (s) => s * 1000;
 
-test('plan params are the documented defaults', () => {
-  assert.deepEqual(MAX, { ttl: 3600, idleThreshold: 3480 });
-  assert.deepEqual(PRO, { ttl: 300, idleThreshold: 240 });
-  assert.deepEqual(planParams('unknown'), PRO, 'unknown plan falls back to pro');
+// ---- regimeParams ----
+test('regime params are the documented defaults', () => {
+  assert.deepEqual(LONG, { ttl: 3600, idleThreshold: 3480 });
+  assert.deepEqual(SHORT, { ttl: 300, idleThreshold: 240 });
+  assert.deepEqual(regimeParams('unknown'), SHORT, 'unknown regime falls back to short (conservative)');
+  assert.deepEqual(regimeParams(null), SHORT, 'null regime falls back to short');
 });
 
 test('overrides win', () => {
-  assert.deepEqual(planParams('max', { ttl: 60, idleThreshold: 60 }), { ttl: 60, idleThreshold: 60 });
+  assert.deepEqual(regimeParams('long', { ttl: 60, idleThreshold: 60 }), { ttl: 60, idleThreshold: 60 });
 });
 
-test('max: injects when transcript idle past threshold and cooldown clear', () => {
-  assert.equal(decideInject({ now: NOW, idleMs: ms(3500), lastFire: 0, ...MAX, disabled: false }), true);
+test('REGIME_PARAMS export is intact', () => {
+  assert.equal(REGIME_PARAMS.long.ttl, 3600);
+  assert.equal(REGIME_PARAMS.short.idleThreshold, 240);
+});
+
+// ---- decideInject (unchanged) ----
+test('long: injects when transcript idle past threshold and cooldown clear', () => {
+  assert.equal(decideInject({ now: NOW, idleMs: ms(3500), lastFire: 0, ...LONG, disabled: false }), true);
 });
 
 test('disabled blocks injection', () => {
-  assert.equal(decideInject({ now: NOW, idleMs: ms(3500), lastFire: 0, ...MAX, disabled: true }), false);
+  assert.equal(decideInject({ now: NOW, idleMs: ms(3500), lastFire: 0, ...LONG, disabled: true }), false);
 });
 
 test('unknown transcript idle (null) blocks injection', () => {
-  assert.equal(decideInject({ now: NOW, idleMs: null, lastFire: 0, ...MAX, disabled: false }), false);
+  assert.equal(decideInject({ now: NOW, idleMs: null, lastFire: 0, ...LONG, disabled: false }), false);
 });
 
 test('idle below threshold blocks injection', () => {
-  assert.equal(decideInject({ now: NOW, idleMs: ms(10), lastFire: 0, ...MAX, disabled: false }), false);
+  assert.equal(decideInject({ now: NOW, idleMs: ms(10), lastFire: 0, ...LONG, disabled: false }), false);
 });
 
 test('cooldown blocks injection', () => {
-  assert.equal(decideInject({ now: NOW, idleMs: ms(3500), lastFire: NOW - ms(100), ...MAX, disabled: false }), false);
+  assert.equal(decideInject({ now: NOW, idleMs: ms(3500), lastFire: NOW - ms(100), ...LONG, disabled: false }), false);
 });
 
 test('injects again after cooldown passes', () => {
-  assert.equal(decideInject({ now: NOW, idleMs: ms(3500), lastFire: NOW - ms(3700), ...MAX, disabled: false }), true);
+  assert.equal(decideInject({ now: NOW, idleMs: ms(3500), lastFire: NOW - ms(3700), ...LONG, disabled: false }), true);
 });
 
-test('pro: idle 250s injects, 200s does not', () => {
-  assert.equal(decideInject({ now: NOW, idleMs: ms(250), lastFire: 0, ...PRO, disabled: false }), true);
-  assert.equal(decideInject({ now: NOW, idleMs: ms(200), lastFire: 0, ...PRO, disabled: false }), false);
+test('short: idle 250s injects, 200s does not', () => {
+  assert.equal(decideInject({ now: NOW, idleMs: ms(250), lastFire: 0, ...SHORT, disabled: false }), true);
+  assert.equal(decideInject({ now: NOW, idleMs: ms(200), lastFire: 0, ...SHORT, disabled: false }), false);
 });
 
-test('PLAN_PARAMS export is intact', () => {
-  assert.equal(PLAN_PARAMS.max.ttl, 3600);
-  assert.equal(PLAN_PARAMS.pro.idleThreshold, 240);
-});
-
+// ---- encode / transcript path + idle ----
 test('encodeProjectDir mirrors Claude Code path encoding', () => {
   assert.equal(encodeProjectDir('C:\\temp\\scripts\\cwarm'), 'C--temp-scripts-cwarm');
   assert.equal(encodeProjectDir('/home/u/proj'), '-home-u-proj');
@@ -92,5 +97,69 @@ test('transcript idle: falls back to global newest when cwd dir is missing', () 
   fs.utimesSync(f, t, t);
   const idle = transcriptIdleMs(dir, 'C:\\unmatched\\cwd', NOW);
   assert.ok(Math.abs(idle - ms(300)) < 2000, `expected fallback idle ~300s, got ${idle}ms`);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ---- readTtlRegime / detectTtlRegime ----
+function asst(cc) {
+  return JSON.stringify({ type: 'assistant', message: { usage: { cache_creation: cc } } });
+}
+
+test('readTtlRegime: returns null when path missing', () => {
+  assert.equal(readTtlRegime(null), null);
+  assert.equal(readTtlRegime(path.join(os.tmpdir(), 'cwarm-nope-' + Date.now() + '.jsonl')), null);
+});
+
+test('readTtlRegime: any recent 1h write -> long', () => {
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-r-')), 't.jsonl');
+  fs.writeFileSync(f, [
+    asst({ ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 24399 }),
+    asst({ ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 882 }),
+  ].join('\n') + '\n');
+  assert.equal(readTtlRegime(f), 'long');
+  fs.rmSync(path.dirname(f), { recursive: true, force: true });
+});
+
+test('readTtlRegime: only 5m writes -> short', () => {
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-r-')), 't.jsonl');
+  fs.writeFileSync(f, [
+    asst({ ephemeral_5m_input_tokens: 1200, ephemeral_1h_input_tokens: 0 }),
+    asst({ ephemeral_5m_input_tokens: 300, ephemeral_1h_input_tokens: 0 }),
+  ].join('\n') + '\n');
+  assert.equal(readTtlRegime(f), 'short');
+  fs.rmSync(path.dirname(f), { recursive: true, force: true });
+});
+
+test('readTtlRegime: a recent 5m-only turn does not mask an older 1h write (false-5m guard)', () => {
+  // newest turn re-wrote only a small 5m suffix while the 1h prefix was a cache hit (1h=0 that turn)
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-r-')), 't.jsonl');
+  fs.writeFileSync(f, [
+    asst({ ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 24000 }), // older: real 1h prefix
+    asst({ ephemeral_5m_input_tokens: 120, ephemeral_1h_input_tokens: 0 }),   // newest: tiny 5m suffix only
+  ].join('\n') + '\n');
+  assert.equal(readTtlRegime(f), 'long', 'scanning back a few turns still finds the 1h write');
+  fs.rmSync(path.dirname(f), { recursive: true, force: true });
+});
+
+test('readTtlRegime: no cache_creation evidence -> null', () => {
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-r-')), 't.jsonl');
+  fs.writeFileSync(f, [
+    JSON.stringify({ type: 'user', message: { content: 'hi' } }),
+    asst({ ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 }),
+    'not-json-garbage',
+  ].join('\n') + '\n');
+  assert.equal(readTtlRegime(f), null);
+  fs.rmSync(path.dirname(f), { recursive: true, force: true });
+});
+
+test('detectTtlRegime: locates the cwd transcript and reads its regime', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-d-'));
+  const cwd = 'C:\\proj\\y';
+  const pdir = path.join(dir, 'projects', encodeProjectDir(cwd));
+  fs.mkdirSync(pdir, { recursive: true });
+  fs.writeFileSync(path.join(pdir, 's.jsonl'),
+    asst({ ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 5000 }) + '\n');
+  assert.equal(detectTtlRegime(dir, cwd), 'long');
+  assert.equal(typeof transcriptPath(dir, cwd), 'string');
   fs.rmSync(dir, { recursive: true, force: true });
 });

@@ -1,16 +1,17 @@
-// keepalive.mjs — 決策邏輯 + plan / 閒置偵測（無 PTY，便於單元測試）。
+// keepalive.mjs — 決策邏輯 + TTL 檔位 / 閒置偵測（無 PTY，便於單元測試）。
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-// plan → { ttl(秒), idleThreshold(秒) }。對齊各家慣例：max 提早 ~2 分注入、pro 提早 1 分。
-export const PLAN_PARAMS = {
-  max: { ttl: 3600, idleThreshold: 3480 },
-  pro: { ttl: 300, idleThreshold: 240 },
+// TTL 檔位 → { ttl(秒), idleThreshold(秒) }。long=1h cache、short=5m cache。
+// 提早注入幅度對齊各家慣例：long 提早 ~2 分、short 提早 1 分。
+export const REGIME_PARAMS = {
+  long: { ttl: 3600, idleThreshold: 3480 },
+  short: { ttl: 300, idleThreshold: 240 },
 };
 
-export function planParams(plan, overrides = {}) {
-  const base = PLAN_PARAMS[plan] || PLAN_PARAMS.pro;
+export function regimeParams(regime, overrides = {}) {
+  const base = REGIME_PARAMS[regime] || REGIME_PARAMS.short; // 未知一律 short（保守，門檻短不讓 cache 冷掉）
   return {
     ttl: overrides.ttl ?? base.ttl,
     idleThreshold: overrides.idleThreshold ?? base.idleThreshold,
@@ -21,52 +22,53 @@ export function defaultClaudeDir() {
   return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 }
 
-// 從 Claude Code 憑證判方案；讀不到一律當 'pro'（保守）。
-export function detectPlan(claudeDir = defaultClaudeDir()) {
-  try {
-    const cred = JSON.parse(fs.readFileSync(path.join(claudeDir, '.credentials.json'), 'utf8'));
-    return cred?.claudeAiOauth?.subscriptionType === 'max' ? 'max' : 'pro';
-  } catch {
-    return 'pro';
-  }
-}
-
 // Claude Code 把 transcript 存在 ~/.claude/projects/<編碼後的 cwd>/<uuid>.jsonl，
 // 編碼規則為「非英數字元一律換成 '-'」（例：C:\temp\scripts\cwarm → C--temp-scripts-cwarm）。
 export function encodeProjectDir(cwd) {
   return String(cwd).replace(/[^a-zA-Z0-9]/g, '-');
 }
 
-// 某資料夾內所有 *.jsonl 的最新 mtime（毫秒）；沒有則 null。
-function newestJsonlMtime(dir) {
+// 某資料夾內 mtime 最新的 *.jsonl 完整路徑；沒有則 null。
+function newestJsonlPath(dir) {
   let entries;
   try { entries = fs.readdirSync(dir); } catch { return null; }
-  let newest = null;
+  let best = null, bestM = null;
   for (const name of entries) {
     if (!name.endsWith('.jsonl')) continue;
     try {
       const m = fs.statSync(path.join(dir, name)).mtimeMs;
-      if (newest == null || m > newest) newest = m;
+      if (bestM == null || m > bestM) { bestM = m; best = path.join(dir, name); }
     } catch { /* skip unreadable */ }
   }
-  return newest;
+  return best;
 }
 
-// 本 session transcript 的最新 mtime（毫秒）：優先 cwd 對應的 project 資料夾，
+// 本 session transcript 的完整路徑：優先 cwd 對應的 project 資料夾，
 // 找不到再退回 projects 底下全域最新（cwarm 本就假設單一 session）。null = 完全找不到。
-export function transcriptMtimeMs(claudeDir, cwd) {
+export function transcriptPath(claudeDir, cwd) {
   const projects = path.join(claudeDir, 'projects');
-  const direct = newestJsonlMtime(path.join(projects, encodeProjectDir(cwd)));
+  const direct = newestJsonlPath(path.join(projects, encodeProjectDir(cwd)));
   if (direct != null) return direct;
   let subdirs;
   try { subdirs = fs.readdirSync(projects, { withFileTypes: true }); } catch { return null; }
-  let newest = null;
+  let best = null, bestM = null;
   for (const d of subdirs) {
     if (!d.isDirectory()) continue;
-    const m = newestJsonlMtime(path.join(projects, d.name));
-    if (m != null && (newest == null || m > newest)) newest = m;
+    const p = newestJsonlPath(path.join(projects, d.name));
+    if (p == null) continue;
+    try {
+      const m = fs.statSync(p).mtimeMs;
+      if (bestM == null || m > bestM) { bestM = m; best = p; }
+    } catch { /* skip */ }
   }
-  return newest;
+  return best;
+}
+
+// 本 session transcript 的最新 mtime（毫秒）；null = 完全找不到。
+export function transcriptMtimeMs(claudeDir, cwd) {
+  const p = transcriptPath(claudeDir, cwd);
+  if (!p) return null;
+  try { return fs.statSync(p).mtimeMs; } catch { return null; }
 }
 
 // 距上次訊息（transcript 寫入）多久（毫秒）；找不到 transcript 回 null。
@@ -75,6 +77,53 @@ export function transcriptMtimeMs(claudeDir, cwd) {
 export function transcriptIdleMs(claudeDir, cwd, now = Date.now()) {
   const m = transcriptMtimeMs(claudeDir, cwd);
   return m == null ? null : now - m;
+}
+
+// 讀 transcript 尾端，判斷這個 session 實際拿到的 cache TTL 檔位。
+// 回傳 'long'(1h) / 'short'(5m) / null（找不到可判讀的 cache_creation）。
+// 為什麼讀 transcript 而非帳號方案：message.usage.cache_creation 的
+// ephemeral_1h_input_tokens / ephemeral_5m_input_tokens 是 API 親口回報「這批 token
+// 寫進哪個 TTL 桶」的實測值；subscriptionType 只是間接猜測，且會被 client 版本、
+// 環境變數、伺服器端旗標影響而失準（實測 pro 帳號也可能拿到 1h）。
+export function readTtlRegime(tpath, { maxBytes = 65536, scanTurns = 8 } = {}) {
+  if (!tpath) return null;
+  let size, buf;
+  let fd = null;
+  try {
+    size = fs.statSync(tpath).size;
+    const start = Math.max(0, size - maxBytes);
+    const len = size - start;
+    buf = Buffer.alloc(len);
+    fd = fs.openSync(tpath, 'r');
+    fs.readSync(fd, buf, 0, len, start);
+  } catch {
+    return null;
+  } finally {
+    if (fd != null) { try { fs.closeSync(fd); } catch {} }
+  }
+  let lines = buf.toString('utf8').split(/\r?\n/);
+  if (size > maxBytes && lines.length) lines = lines.slice(1); // 丟掉被切半的第一行
+  let sawShort = false;
+  let examined = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let obj;
+    try { obj = JSON.parse(line); } catch { continue; }
+    if (!obj || obj.type !== 'assistant') continue;
+    const cc = obj.message && obj.message.usage && obj.message.usage.cache_creation;
+    if (!cc || typeof cc !== 'object') continue;
+    const h = cc.ephemeral_1h_input_tokens || 0;
+    const m = cc.ephemeral_5m_input_tokens || 0;
+    if (h > 0) return 'long';                 // 最近任一回合寫過 1h → 1h 檔位（決定性）
+    if (m > 0) { sawShort = true; if (++examined >= scanTurns) break; } // 只看最近數筆有寫 cache 的回合
+  }
+  return sawShort ? 'short' : null;
+}
+
+// 找出本 session transcript 並判斷 TTL 檔位。'long' / 'short' / null。
+export function detectTtlRegime(claudeDir, cwd, opts) {
+  return readTtlRegime(transcriptPath(claudeDir, cwd), opts);
 }
 
 // 純決策：現在該不該注入 keepalive？idleMs = 距上次訊息多久（由 transcriptIdleMs 算）。
