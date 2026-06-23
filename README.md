@@ -106,6 +106,35 @@ Environment variables (mostly for testing / advanced use):
 - **選配 statusline**（顯示 `♻️ cache 58m12s` 倒數；會先備份、包裝既有 statusline、可一鍵還原）：`cwarm setup` / `cwarm setup --remove`
 - **限制**：不能 detach（關視窗＝結束，但縮小／背景照常保溫）。
 
+### 運作原理
+
+- **PTY host**：`cwarm` 把 `claude` spawn 在一個它自己擁有的 pseudo-terminal 裡，透明地把你的鍵盤 ↔ claude ↔ 畫面（含視窗 resize）接起來。這跟 tmux／expect／VS Code 終端的做法相同，也是唯一穩健、能把輸入注入終端程式的方式。
+- **閒置偵測**：閒置＝距你上次**訊息**多久，量自 `~/.claude/projects/` 底下最新的 transcript 檔。這才是決定 cache 年齡的訊號——捲動、用方向鍵讀、打到一半沒送出，都是終端輸入但不會刷新 cache，所以不該算成活動。（早期版本計時鍵盤輸入，會讓你在閱讀時 cache 冷掉。）
+- **TTL 感知（實測，非猜測）**：cache TTL 直接讀自 transcript 的 `message.usage.cache_creation`，不從訂閱方案推斷——最近有寫 `ephemeral_1h_input_tokens` → 1h cache（閒置約 58 分才注入、冷卻 1h）；只有 `ephemeral_5m_input_tokens`（或還沒證據）→ 5m cache（保守，約 4 分注入、冷卻 5m）。這能撐過 client 版本、環境變數、伺服器旗標的變動（例如 Pro 帳號也可能拿到 1h cache）。
+- **提示安全注入**：keepalive 只在 PTY **靜止一小段時間後**才觸發（`CWARM_QUIET_MS`，預設 2.5 秒）。必答提示（工具權限、`AskUserQuestion`、計畫批准）的 spinner 會一直動，忙著跑工具時也持續輸出，兩者都「不安靜」，所以 keepalive 不會送進去（不會誤選選單預設項、也不會打斷長工具執行）。而且注入時會**先送 `Esc`** 退回輸入框，那個 Enter 永遠落不到提示上。（提示真的卡住時 cache 本來就無法保溫，等你回答後會自動恢復。）
+- **與焦點／縮小無關**：注入是行程內部的 `pty.write`，跟視窗狀態無關。只有關閉視窗（結束 host 行程）才會停。
+
+### 設定
+
+環境變數（多為測試／進階用途）：
+
+| 變數 | 意義 |
+|-----|------|
+| `CWARM_MSG` | keepalive 訊息（預設 `hi`） |
+| `CWARM_TICK_MS` | 檢查間隔（預設 `20000`） |
+| `CWARM_QUIET_MS` | 畫面需靜止多久才注入（預設 `2500`） |
+| `CWARM_ESC_DELAY_MS` | `Esc` 與訊息之間的間隔（預設 `250`） |
+| `CWARM_THRESHOLD_S` | 覆寫閒置門檻（秒） |
+| `CWARM_TTL_S` | 覆寫冷卻（秒） |
+| `CWARM_CLAUDE` | `claude` 執行檔路徑（否則用 `which`／`where` 自動偵測） |
+| `CLAUDE_CONFIG_DIR` | Claude 設定目錄（預設 `~/.claude`） |
+
+### 平台支援
+
+- **Windows**（Git Bash／PowerShell／cmd／Windows Terminal）：已驗證，含非 ASCII（中日韓）輸入。
+- **Linux arm64／aarch64**：已在 Raspberry Pi 4（Debian、Node 22）驗證——全域安裝（node-pty 乾淨編譯）、`cwarm` 啟動、即時 keepalive 注入都確認可用。x64 預期相同。
+- **macOS**：同樣的跨平台機制（node-pty ＋ 你 shell 裡的 `claude`）；預期可用，尚未實測，歡迎回報。
+
 ## Changelog
 
 ### 0.1.6
