@@ -61,6 +61,47 @@ test('short: idle 250s injects, 200s does not', () => {
   assert.equal(decideInject({ now: NOW, idleMs: ms(200), lastFire: 0, ...SHORT, disabled: false }), false);
 });
 
+// ---- decideInject: screen-quiescence gate ----
+// Only inject when the PTY has been silent a while: an animating prompt (awaiting a
+// mandatory answer) and a busy tool-run both keep emitting output, so the gate stays shut
+// there; a settled idle input box is quiet, so it opens. quietMs omitted => gate not applied.
+const QUIET = 2500;
+
+test('screen still active (animating prompt / busy / typing) blocks injection', () => {
+  assert.equal(
+    decideInject({ now: NOW, idleMs: ms(3500), lastFire: 0, ...LONG, disabled: false, screenIdleMs: 200, quietMs: QUIET }),
+    false,
+  );
+});
+
+test('screen quiet long enough allows injection', () => {
+  assert.equal(
+    decideInject({ now: NOW, idleMs: ms(3500), lastFire: 0, ...LONG, disabled: false, screenIdleMs: ms(5), quietMs: QUIET }),
+    true,
+  );
+});
+
+test('screen idle exactly at the quiet threshold allows injection (>=)', () => {
+  assert.equal(
+    decideInject({ now: NOW, idleMs: ms(3500), lastFire: 0, ...LONG, disabled: false, screenIdleMs: QUIET, quietMs: QUIET }),
+    true,
+  );
+});
+
+test('quiescence gate is opt-in: omitting quietMs keeps the pure idle decision', () => {
+  assert.equal(
+    decideInject({ now: NOW, idleMs: ms(3500), lastFire: 0, ...LONG, disabled: false, screenIdleMs: 0 }),
+    true,
+  );
+});
+
+test('quiescence does not override the other gates (idle below threshold still blocks)', () => {
+  assert.equal(
+    decideInject({ now: NOW, idleMs: ms(10), lastFire: 0, ...LONG, disabled: false, screenIdleMs: ms(60), quietMs: QUIET }),
+    false,
+  );
+});
+
 // ---- encode / transcript path + idle ----
 test('encodeProjectDir mirrors Claude Code path encoding', () => {
   assert.equal(encodeProjectDir('C:\\temp\\scripts\\cwarm'), 'C--temp-scripts-cwarm');

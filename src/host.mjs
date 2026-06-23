@@ -53,7 +53,10 @@ export function startHost(opts = {}) {
   if (process.stdin.isTTY) { try { process.stdin.setRawMode(true); } catch {} }
   process.stdin.resume();
   process.stdin.on('data', (d) => { ptyProc.write(d); });
-  ptyProc.onData((d) => process.stdout.write(d));
+  // 追蹤 claude 最近一次有輸出到畫面的時刻：閒置在輸入框時畫面靜止；提示等待回答時 spinner 在動、
+  // 生成/跑工具時持續輸出。注入前要求畫面已靜止一段時間（見下方 quietMs），就能避開「忙/卡」狀態。
+  let lastOutputMs = Date.now();
+  ptyProc.onData((d) => { lastOutputMs = Date.now(); process.stdout.write(d); });
   process.stdout.on('resize', () => {
     try { ptyProc.resize(process.stdout.columns || 80, process.stdout.rows || 24); } catch {}
   });
@@ -61,6 +64,8 @@ export function startHost(opts = {}) {
   // ---- 內建保溫 ----
   const tickMs = Number(process.env.CWARM_TICK_MS) || 20_000;
   const msg = process.env.CWARM_MSG || opts.msg || 'hi';
+  const quietMs = Number(process.env.CWARM_QUIET_MS) || 2500;      // 畫面需靜止這麼久才注入
+  const escDelayMs = Number(process.env.CWARM_ESC_DELAY_MS) || 250; // Esc 與訊息之間的間隔
   const overrides = {};
   const thr = process.env.CWARM_THRESHOLD_S ?? opts.thresholdS;
   const ttlO = process.env.CWARM_TTL_S ?? opts.ttlS;
@@ -74,11 +79,15 @@ export function startHost(opts = {}) {
     const { ttl, idleThreshold } = regimeParams(regime, overrides);
     const now = Date.now();
     const idleMs = transcriptIdleMs(claudeDir, cwd, now);
-    if (decideInject({ now, idleMs, lastFire, idleThreshold, ttl, disabled: fs.existsSync(DISABLE) })) {
-      ptyProc.write(msg + '\r');
+    const screenIdleMs = now - lastOutputMs;
+    if (decideInject({ now, idleMs, lastFire, idleThreshold, ttl, disabled: fs.existsSync(DISABLE), screenIdleMs, quietMs })) {
+      // 先送 Esc：把任何「必答」modal（權限/選單/計畫批准）收掉、退回輸入框，後面那個 Enter 才不會誤選預設項；
+      // 空輸入框時 Esc 等同 no-op。隔一小段再送訊息——讓 claude 先把 modal 收乾淨，也避免 ESC 與字元被併成 Meta 鍵。
+      ptyProc.write('\x1b');
       lastFire = now;
+      setTimeout(() => { if (!exiting) { try { ptyProc.write(msg + '\r'); } catch {} } }, escDelayMs);
       const idle = idleMs == null ? -1 : Math.round(idleMs / 1000);
-      try { fs.appendFileSync(LOG, `${new Date().toISOString()} inject "${msg}" regime=${regime ?? 'unknown'} idle=${idle}s\n`); } catch {}
+      try { fs.appendFileSync(LOG, `${new Date().toISOString()} inject "${msg}" regime=${regime ?? 'unknown'} idle=${idle}s screenIdle=${Math.round(screenIdleMs / 1000)}s\n`); } catch {}
     }
   }, tickMs);
 

@@ -44,6 +44,7 @@ It's transparent — type and use claude exactly as normal (no `Ctrl-b` prefix, 
   - any recent turn wrote `ephemeral_1h_input_tokens` → **1 h cache** → inject after ~58 min idle, cooldown 1 h.
   - only `ephemeral_5m_input_tokens` (or no evidence yet) → **5 min cache** (conservative) → inject after ~4 min idle, cooldown 5 min.
   - This survives client‑version, env‑var and server‑flag changes that the plan string can't see (e.g. a Pro account can still get a 1 h cache).
+- **Prompt‑safe injection** — the keepalive only fires once the PTY has been **silent for a moment** (`CWARM_QUIET_MS`, default 2.5 s). A mandatory prompt (tool‑permission, `AskUserQuestion`, plan approval) keeps animating its spinner, and a busy tool‑run keeps streaming output — both are "not silent", so the keepalive won't fire into them (no accidental menu‑default selection, no interrupting a long tool‑run). And when it does fire it's **`Esc`‑prefixed**: it backs out to the input box first, so the keepalive's Enter can never land on a prompt and auto‑select. (While a prompt is genuinely blocking, the cache can't be kept warm regardless — no API turn can happen until you answer — so it simply resumes once you do.)
 - **Focus/minimize independent** — injection is an in‑process `pty.write`, unrelated to window state. Only closing the window (ending the host process) stops it.
 
 ## Optional: cache‑countdown statusline
@@ -71,6 +72,8 @@ Environment variables (mostly for testing / advanced use):
 |-----|---------|
 | `CWARM_MSG` | keepalive message (default `hi`) |
 | `CWARM_TICK_MS` | check interval (default `20000`) |
+| `CWARM_QUIET_MS` | screen must be silent this long before injecting (default `2500`) |
+| `CWARM_ESC_DELAY_MS` | gap between the `Esc` and the keepalive message (default `250`) |
 | `CWARM_THRESHOLD_S` | override idle threshold (seconds) |
 | `CWARM_TTL_S` | override cooldown (seconds) |
 | `CWARM_CLAUDE` | path to the `claude` executable (otherwise auto‑detected via `which`/`where`) |
@@ -80,7 +83,8 @@ Environment variables (mostly for testing / advanced use):
 
 - **No detach.** Closing the window ends the session — there's no tmux‑style detach/reattach (that would mean reimplementing a terminal multiplexer; out of scope). But minimize / background / unfocused all keep working.
 - **Single session.** Designed for one `cwarm` session at a time.
-- If you walk away mid‑typing, an injected `hi` is appended to whatever's in the input box. Rare and harmless.
+- If you walk away with a half‑typed draft and stay idle past the threshold, the keepalive's `Esc` clears the draft before sending `hi`. Rare.
+- **A genuinely blocking prompt can't be kept warm.** While Claude Code waits on a mandatory answer, no API turn can happen, so the cache may cool during that window; warming resumes automatically once you answer.
 
 ## Platform support
 
@@ -103,6 +107,9 @@ Environment variables (mostly for testing / advanced use):
 - **限制**：不能 detach（關視窗＝結束，但縮小／背景照常保溫）。
 
 ## Changelog
+
+### 0.1.5
+- **Fix:** the keepalive could fire while Claude Code was showing a **mandatory prompt** (tool‑permission, `AskUserQuestion`, plan approval). Because the injected `hi␍` ends in Enter, that Enter landed on the prompt and selected its highlighted default — e.g. **auto‑approving a tool** — instead of sending a message (the reported "can't send `hi`"). Two layers fix it: **(1)** injection now waits for the PTY to be **quiet** (`CWARM_QUIET_MS`, default 2.5 s) — an animating prompt and a busy tool‑run both keep emitting output, so the keepalive no longer fires into either (this also stops it interrupting a long tool‑run, which the transcript‑mtime idle timer can't see); **(2)** the keepalive is now **`Esc`‑prefixed** (`CWARM_ESC_DELAY_MS` gap, default 250 ms) — it backs out of any prompt to the input box before sending `hi`, so the Enter can never select a menu default. Investigated empirically: a pending tool turn isn't written to the transcript while blocked (so transcript inspection can't detect this state), but the screen reliably distinguishes idle (silent) from prompt/busy (animating). While a prompt is genuinely blocking the cache can't be kept warm regardless; warming resumes once you answer.
 
 ### 0.1.4
 - **Fix:** the terminal could be left unusable after `/exit` or Ctrl‑C (keystrokes garbled / no usable input). The PTY host now restores the terminal on every exit path: it emits an explicit reset (disabling alt‑screen, bracketed‑paste, mouse, cursor‑hide, and — critically on Windows — `win32‑input‑mode` `?9001` and focus‑reporting `?1004`, which otherwise make the shell receive keystrokes as unparseable `ESC[…_` packets) and flushes stdout before exiting. Adds a `SIGINT` handler that forwards `0x03` to claude instead of letting the host be killed before cleanup, plus `SIGHUP`/`exit` safety restores.

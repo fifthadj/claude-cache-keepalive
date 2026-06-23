@@ -127,10 +127,17 @@ export function detectTtlRegime(claudeDir, cwd, opts) {
 }
 
 // 純決策：現在該不該注入 keepalive？idleMs = 距上次訊息多久（由 transcriptIdleMs 算）。
-export function decideInject({ now, idleMs, lastFire, idleThreshold, ttl, disabled }) {
+// screenIdleMs = 距 claude 最近一次「畫面輸出」多久；quietMs = 需靜止多久才放行。
+// 為什麼要這個畫面靜默門檻：transcript 在「等你回答必答提示（權限/選單/計畫批准）」與
+// 「跑長工具/生成中」時都不會更新，光看 idleMs 無法分辨這兩種「忙/卡」狀態與「真的閒置在輸入框」。
+// 但畫面活動可以：閒置在輸入框時畫面靜止；提示等待時 spinner 在動、生成中持續輸出。
+// 故只有畫面靜止夠久才注入——避免把 hi 的 Enter 送進 modal 誤選預設項，也避免打斷長工具執行。
+// quietMs 省略（null）時不套此門檻（保持純 idle 決策，供既有測試/呼叫者使用）。
+export function decideInject({ now, idleMs, lastFire, idleThreshold, ttl, disabled, screenIdleMs, quietMs }) {
   if (disabled) return false;                          // 暫停開關
   if (idleMs == null) return false;                    // 找不到 transcript → 保守不發
   if (idleMs < idleThreshold * 1000) return false;     // 距上次訊息還不夠久
   if (now - lastFire < ttl * 1000) return false;       // 冷卻未滿一個 TTL
+  if (quietMs != null && screenIdleMs != null && screenIdleMs < quietMs) return false; // 畫面還在動（提示/生成/打字中）
   return true;
 }
