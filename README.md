@@ -108,20 +108,29 @@ Environment variables (mostly for testing / advanced use):
 
 ## Changelog
 
+### 0.1.6
+- **Docs:** every changelog entry now carries a Traditional Chinese version alongside the English. No code change.
+- **文件：** 每條 changelog 現在都在英文旁附上繁體中文。無程式碼變動。
+
 ### 0.1.5
 - **Fix:** the keepalive could fire while Claude Code was showing a **mandatory prompt** (tool‑permission, `AskUserQuestion`, plan approval). Because the injected `hi␍` ends in Enter, that Enter landed on the prompt and selected its highlighted default — e.g. **auto‑approving a tool** — instead of sending a message (the reported "can't send `hi`"). Two layers fix it: **(1)** injection now waits for the PTY to be **quiet** (`CWARM_QUIET_MS`, default 2.5 s) — an animating prompt and a busy tool‑run both keep emitting output, so the keepalive no longer fires into either (this also stops it interrupting a long tool‑run, which the transcript‑mtime idle timer can't see); **(2)** the keepalive is now **`Esc`‑prefixed** (`CWARM_ESC_DELAY_MS` gap, default 250 ms) — it backs out of any prompt to the input box before sending `hi`, so the Enter can never select a menu default. Investigated empirically: a pending tool turn isn't written to the transcript while blocked (so transcript inspection can't detect this state), but the screen reliably distinguishes idle (silent) from prompt/busy (animating). While a prompt is genuinely blocking the cache can't be kept warm regardless; warming resumes once you answer.
+- **修正：** keepalive 可能在 Claude Code 跳出**必答提示**（工具權限、`AskUserQuestion`、計畫批准）時觸發。因為注入的 `hi` 訊息以 Enter 結尾，那個 Enter 會落在提示上、選中反白的預設項——例如**自動核准某個工具**——而不是送出訊息（就是你回報的「送不出 `hi`」）。兩層修正：**(1)** 注入前先等 PTY **靜止**（`CWARM_QUIET_MS`，預設 2.5 秒）——提示在動、忙著跑工具／生成時都會持續輸出，所以 keepalive 不會再送進這兩種狀態（也順帶不會打斷長時間的工具執行，那是 transcript mtime 閒置計時看不到的）；**(2)** keepalive 現在會**先送 `Esc`**（`CWARM_ESC_DELAY_MS` 間隔，預設 250 毫秒）——先退出任何提示、回到輸入框再送 `hi`，那個 Enter 就絕不會選到選單預設項。實測發現：卡住時那個 pending 的工具回合還沒被寫進 transcript（所以查 transcript 偵測不到這個狀態），但畫面能可靠分辨閒置（靜止）與提示／忙碌（在動）。提示真的卡住時 cache 本來就無法保溫；你回答後會自動恢復保溫。
 
 ### 0.1.4
 - **Fix:** the terminal could be left unusable after `/exit` or Ctrl‑C (keystrokes garbled / no usable input). The PTY host now restores the terminal on every exit path: it emits an explicit reset (disabling alt‑screen, bracketed‑paste, mouse, cursor‑hide, and — critically on Windows — `win32‑input‑mode` `?9001` and focus‑reporting `?1004`, which otherwise make the shell receive keystrokes as unparseable `ESC[…_` packets) and flushes stdout before exiting. Adds a `SIGINT` handler that forwards `0x03` to claude instead of letting the host be killed before cleanup, plus `SIGHUP`/`exit` safety restores.
+- **修正：** `/exit` 或 Ctrl-C 之後終端可能變得不能用（鍵盤輸入亂碼／打不了字）。PTY host 現在會在每條退出路徑都還原終端：主動送出一段明確的重置序列（關掉 alt-screen、bracketed-paste、滑鼠、隱藏游標，以及——在 Windows 上最關鍵的——`win32-input-mode` `?9001` 與 focus-reporting `?1004`，否則 shell 會把每個鍵碼當成無法解析的 `ESC[…_` 封包收下），並在退出前把 stdout flush 掉。新增 `SIGINT` handler 把 `0x03` 轉送給 claude，而不是讓 host 在清理前就被殺掉；另加 `SIGHUP`／`exit` 的保險還原。
 
 ### 0.1.3
 - **Change:** the cache TTL is now **measured from the transcript** (`message.usage.cache_creation`'s `ephemeral_1h` / `ephemeral_5m` tokens) instead of being guessed from your subscription plan. A recent 1h write → 1h regime; only 5m writes (or no evidence) → 5m regime (conservative). This drops the `~/.claude/.credentials.json` read entirely and is correct even when a Pro account gets a 1h cache. Adds `transcriptPath` / `readTtlRegime` / `detectTtlRegime` / `regimeParams`; removes `detectPlan` / `planParams`.
+- **變更：** cache TTL 現在**直接從 transcript 實測**（`message.usage.cache_creation` 裡的 `ephemeral_1h`／`ephemeral_5m` token），不再用你的訂閱方案去猜。最近有任一回合寫過 1h → 1h 檔位；只有 5m 寫入（或還沒有證據）→ 5m 檔位（保守）。這完全拿掉了對 `~/.claude/.credentials.json` 的讀取，連 Pro 帳號拿到 1h cache 的情況也判得對。新增 `transcriptPath`／`readTtlRegime`／`detectTtlRegime`／`regimeParams`；移除 `detectPlan`／`planParams`。
 
 ### 0.1.2
 - **Fix:** idle is now measured from the newest transcript file's mtime — i.e. time since your last *message* — instead of keystrokes. Scrolling, arrow‑key reading, or a half‑typed prompt no longer reset the idle timer, so the keepalive actually fires while you're reading and the cache stops going cold. Adds `encodeProjectDir` / `transcriptMtimeMs` / `transcriptIdleMs`.
+- **修正：** 閒置現在改用最新 transcript 檔的 mtime 來計算——也就是距你上次*發訊息*多久——而不是看鍵盤輸入。捲動、用方向鍵讀回覆、或打到一半還沒送出，都不會再重置閒置計時，所以 keepalive 會在你閱讀時照常觸發、cache 不再冷掉。新增 `encodeProjectDir`／`transcriptMtimeMs`／`transcriptIdleMs`。
 
 ### 0.1.0
 - Initial release. (0.1.1 was a version‑only bump and was never published to npm.)
+- **首次發佈。**（0.1.1 只是純版本號 bump，從未發佈到 npm。）
 
 ## License
 
