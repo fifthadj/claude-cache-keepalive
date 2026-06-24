@@ -35,7 +35,9 @@ export function startHost(opts = {}) {
   const LOG = path.join(claudeDir, 'cwarm-keepalive.log');
   const DISABLE = path.join(claudeDir, 'cwarm.disabled');
 
-  const args = opts.args && opts.args.length ? opts.args : ['--continue'];
+  // 完全透傳：cwarm [args] === claude [args]。不帶參數就是乾淨的 `claude`（全新 session）；
+  // 要接續上次請自己打 `cwarm --continue`。不再隱含補 --continue。
+  const args = opts.args || [];
   const { file, args: spawnArgs } = spawnSpec(resolveClaude(), args);
 
   const ptyProc = pty.spawn(file, spawnArgs, {

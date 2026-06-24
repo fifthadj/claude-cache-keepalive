@@ -12,14 +12,16 @@ if (first === 'setup') {
   printHelp();
   process.exit(0);
 } else {
-  startHost({ args: argv }); // 無參數時 host 內部預設 --continue
+  startHost({ args: argv }); // 完全透傳給 claude；不帶參數就是乾淨的 claude（不再隱含 --continue）
 }
 
 function printHelp() {
   process.stdout.write(`cwarm — keep Claude Code's prompt cache warm while idle.
 
 Usage:
-  cwarm [claude args...]   Launch claude (default: --continue) inside the keepalive host.
+  cwarm [claude args...]   Launch claude inside the keepalive host. Args pass straight
+                           through, so \`cwarm\` === plain \`claude\`; use \`cwarm --continue\`
+                           to resume your last session.
   cwarm setup              Optionally install the cache-countdown statusline (opt-in).
   cwarm setup --remove     Remove the statusline this tool installed.
   cwarm help               Show this help.

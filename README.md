@@ -23,8 +23,8 @@ This puts a `cwarm` command on your PATH (npm creates both the Unix and Windows 
 ## Usage
 
 ```sh
-cwarm                 # = claude --continue, inside the keepalive host
-cwarm new             # any claude args are passed straight through
+cwarm                 # = plain `claude`, inside the keepalive host (no implicit --continue)
+cwarm --continue      # resume your last session; any claude args pass straight through
 cwarm resume
 cwarm -p "..."
 cwarm --version       # (passed through → prints claude's version)
@@ -101,7 +101,7 @@ Environment variables (mostly for testing / advanced use):
 > ⚠️ **誠實說明**：保溫＝閒置時送一則小訊息（`hi`），會消耗你的方案用量、並在對話留下 `hi` 紀錄。只在長時間閒置後才觸發（1h cache 約 58 分、5m cache 約 4 分）且有冷卻，屬保守設計、明確 opt‑in。不接受這個取捨就別用。
 
 - **安裝**：`npm install -g claude-cache-keepalive`
-- **使用**：`cwarm`（＝`claude --continue` 跑在保溫 host 裡；其餘參數原樣轉給 claude）
+- **使用**：`cwarm`（＝乾淨的 `claude` 跑在保溫 host 裡，不再隱含 `--continue`；要接續上次打 `cwarm --continue`，其餘參數原樣轉給 claude）
 - **暫停**：`touch ~/.claude/cwarm.disabled`；**紀錄**：`~/.claude/cwarm-keepalive.log`
 - **選配 statusline**（顯示 `♻️ cache 58m12s` 倒數；會先備份、包裝既有 statusline、可一鍵還原）：`cwarm setup` / `cwarm setup --remove`
 - **限制**：不能 detach（關視窗＝結束，但縮小／背景照常保溫）。
@@ -136,6 +136,10 @@ Environment variables (mostly for testing / advanced use):
 - **macOS**：同樣的跨平台機制（node-pty ＋ 你 shell 裡的 `claude`）；預期可用，尚未實測，歡迎回報。
 
 ## Changelog
+
+### 0.1.7
+- **Change:** `cwarm` no longer implicitly adds `--continue`. It is now a fully transparent pass‑through — `cwarm [args]` is exactly `claude [args]`, so bare `cwarm` starts a clean session. To resume your last session, run `cwarm --continue`. (Previously bare `cwarm` auto‑resumed.)
+- **變更：** `cwarm` 不再隱含補上 `--continue`，改為完全透傳——`cwarm [參數]` 就等於 `claude [參數]`，所以單獨打 `cwarm` 會開全新 session。要接續上次請打 `cwarm --continue`。（先前單獨打 `cwarm` 會自動接續。）
 
 ### 0.1.6
 - **Docs:** every changelog entry now carries a Traditional Chinese version alongside the English. No code change.
