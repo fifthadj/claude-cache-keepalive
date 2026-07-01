@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { defaultClaudeDir, regimeParams, detectTtlRegime, decideInject, transcriptIdleMs } from './keepalive.mjs';
+import { defaultClaudeDir, regimeParams, detectTtlRegime, decideInject, transcriptIdleMs, looksLikeTrustPrompt } from './keepalive.mjs';
 
 const require = createRequire(import.meta.url);
 const isWin = process.platform === 'win32';
@@ -58,7 +58,14 @@ export function startHost(opts = {}) {
   // 追蹤 claude 最近一次有輸出到畫面的時刻：閒置在輸入框時畫面靜止；提示等待回答時 spinner 在動、
   // 生成/跑工具時持續輸出。注入前要求畫面已靜止一段時間（見下方 quietMs），就能避開「忙/卡」狀態。
   let lastOutputMs = Date.now();
-  ptyProc.onData((d) => { lastOutputMs = Date.now(); process.stdout.write(d); });
+  // 保留最近一小段螢幕輸出（含 ANSI），供偵測「資料夾信任」對話框用：那個框被保溫 Esc 掉會留下
+  // hasTrustDialogAccepted:false，害該資料夾 settings.local.json 權限整批失效，故它在畫面上時整輪不注入。
+  let screenBuf = '';
+  ptyProc.onData((d) => {
+    lastOutputMs = Date.now();
+    process.stdout.write(d);
+    screenBuf = (screenBuf + d.toString('utf8')).slice(-8192);
+  });
   process.stdout.on('resize', () => {
     try { ptyProc.resize(process.stdout.columns || 80, process.stdout.rows || 24); } catch {}
   });
@@ -75,7 +82,18 @@ export function startHost(opts = {}) {
   if (ttlO != null) overrides.ttl = Number(ttlO);
 
   let lastFire = 0;
+  let trustGuardLogged = false;
   const timer = setInterval(() => {
+    // 信任對話框在畫面上時，這輪完全不動作（連 Esc 都不送）——那是使用者本人該回答的框，被保溫
+    // Esc 掉會留下 hasTrustDialogAccepted:false，害該資料夾 settings.local.json 權限失效、之後不再跳框。
+    if (looksLikeTrustPrompt(screenBuf)) {
+      if (!trustGuardLogged) {
+        trustGuardLogged = true;
+        try { fs.appendFileSync(LOG, `${new Date().toISOString()} skip: trust dialog on screen — left for the user to answer\n`); } catch {}
+      }
+      return;
+    }
+    trustGuardLogged = false;
     const cwd = process.cwd();
     const regime = detectTtlRegime(claudeDir, cwd);           // 從 transcript 實測 1h/5m，不再猜方案
     const { ttl, idleThreshold } = regimeParams(regime, overrides);

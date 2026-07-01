@@ -137,6 +137,10 @@ Environment variables (mostly for testing / advanced use):
 
 ## Changelog
 
+### 0.1.8
+- **Fix:** the keepalive's `Esc`‑prefix (added in 0.1.5) could dismiss Claude Code's **folder‑trust dialog** ("Do you trust the files in this folder?"). Since 0.1.7 dropped the implicit `--continue`, bare `cwarm` starts a *fresh* session, so an untrusted directory shows the trust dialog on launch; if you stepped away past the idle threshold, the keepalive's `Esc` cancelled it — which writes `hasTrustDialogAccepted: false` into `~/.claude.json` and makes that folder's `.claude/settings.local.json` permissions silently ignored (the "Ignoring N permissions.allow entries: this workspace has not been trusted" warning you only see after `/exit` restores the normal screen). The keepalive now detects the trust dialog on screen and **skips the whole tick** (no `Esc`, no message), leaving it for you to answer; all other mandatory prompts keep the 0.1.5 `Esc` behaviour. Adds `looksLikeTrustPrompt`.
+- **修正：** 0.1.5 加入的 keepalive **`Esc` 先行**可能會把 Claude Code 的**資料夾信任對話框**（「Do you trust the files in this folder?」）給收掉。自 0.1.7 拿掉隱含的 `--continue` 後，單獨打 `cwarm` 會開*全新* session，所以進入未信任的資料夾時啟動就會跳信任框；若你人走開、閒置過門檻，keepalive 的 `Esc` 就把它取消掉——這會在 `~/.claude.json` 寫下 `hasTrustDialogAccepted: false`，使該資料夾的 `.claude/settings.local.json` 權限被靜默忽略（就是你 `/exit` 還原一般畫面後才看到的「Ignoring N permissions.allow entries: this workspace has not been trusted」警告）。keepalive 現在會偵測畫面上的信任框並**整輪跳過**（不送 `Esc`、不送訊息），交給你本人回答；其他必答提示維持 0.1.5 的 `Esc` 行為。新增 `looksLikeTrustPrompt`。
+
 ### 0.1.7
 - **Change:** `cwarm` no longer implicitly adds `--continue`. It is now a fully transparent pass‑through — `cwarm [args]` is exactly `claude [args]`, so bare `cwarm` starts a clean session. To resume your last session, run `cwarm --continue`. (Previously bare `cwarm` auto‑resumed.)
 - **變更：** `cwarm` 不再隱含補上 `--continue`，改為完全透傳——`cwarm [參數]` 就等於 `claude [參數]`，所以單獨打 `cwarm` 會開全新 session。要接續上次請打 `cwarm --continue`。（先前單獨打 `cwarm` 會自動接續。）

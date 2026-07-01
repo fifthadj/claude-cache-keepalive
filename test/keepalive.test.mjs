@@ -6,7 +6,7 @@ import path from 'node:path';
 import {
   decideInject, regimeParams, REGIME_PARAMS,
   encodeProjectDir, transcriptIdleMs, transcriptPath,
-  readTtlRegime, detectTtlRegime,
+  readTtlRegime, detectTtlRegime, looksLikeTrustPrompt,
 } from '../src/keepalive.mjs';
 
 const NOW = 1_000_000_000_000;
@@ -100,6 +100,31 @@ test('quiescence does not override the other gates (idle below threshold still b
     decideInject({ now: NOW, idleMs: ms(10), lastFire: 0, ...LONG, disabled: false, screenIdleMs: ms(60), quietMs: QUIET }),
     false,
   );
+});
+
+// ---- looksLikeTrustPrompt (guards the folder-trust dialog from the Esc injection) ----
+test('trust prompt: matches the plain Claude Code wording', () => {
+  assert.equal(looksLikeTrustPrompt('Do you trust the files in this folder?'), true);
+  assert.equal(looksLikeTrustPrompt('Do you trust the files in this workspace?'), true);
+});
+
+test('trust prompt: matches even with ANSI color/box-drawing around the phrase', () => {
+  const screen =
+    '\x1b[2J\x1b[H\x1b[1m\x1b[38;5;208m╭─ Do you trust\x1b[0m the files in this folder? ─╮\r\n' +
+    '\x1b[2m1. Yes, proceed\x1b[0m\r\n2. No, exit';
+  assert.equal(looksLikeTrustPrompt(screen), true);
+});
+
+test('trust prompt: tolerates whitespace/newlines split across the phrase', () => {
+  assert.equal(looksLikeTrustPrompt('trust   the\r\n  files in this   folder'), true);
+});
+
+test('trust prompt: false for an ordinary idle input box / other prompts', () => {
+  assert.equal(looksLikeTrustPrompt('> \x1b[7m \x1b[0m  esc to interrupt'), false);
+  assert.equal(looksLikeTrustPrompt('Allow this tool to run? 1. Yes 2. No'), false);
+  assert.equal(looksLikeTrustPrompt(''), false);
+  assert.equal(looksLikeTrustPrompt(null), false);
+  assert.equal(looksLikeTrustPrompt(undefined), false);
 });
 
 // ---- encode / transcript path + idle ----

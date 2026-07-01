@@ -141,3 +141,19 @@ export function decideInject({ now, idleMs, lastFire, idleThreshold, ttl, disabl
   if (quietMs != null && screenIdleMs != null && screenIdleMs < quietMs) return false; // 畫面還在動（提示/生成/打字中）
   return true;
 }
+
+// 畫面上是否正顯示 Claude Code 的「資料夾信任」對話框（"Do you trust the files in this folder?"）。
+// 保溫的「Esc 先行」是用來收掉一般必答 modal（權限/選單/計畫批准），但信任框特殊：被 Esc 掉會在
+// ~/.claude.json 寫下 hasTrustDialogAccepted:false，使該資料夾的 .claude/settings.local.json 權限
+// 整批失效、且之後不再自動跳框。這種框只能由使用者本人回答——偵測到就整輪跳過注入（連 Esc 都不送）。
+// 傳入的是原始終端輸出（含 ANSI），先剝掉控制序列再比對，避免顏色/游標碼把字拆開。
+const TRUST_PROMPT_RE = /trust\s+the\s+files\s+in\s+this\s+(?:folder|workspace)/i;
+export function looksLikeTrustPrompt(screenText) {
+  if (!screenText) return false;
+  const plain = String(screenText)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, ' ')  // OSC …（BEL 或 ST 結尾）
+    .replace(/\x1b[@-Z\\-_]/g, ' ')                       // 兩位元組跳脫
+    .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, ' ')          // CSI（顏色/游標）
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ' ');           // 其餘控制碼 → 空白
+  return TRUST_PROMPT_RE.test(plain);
+}
