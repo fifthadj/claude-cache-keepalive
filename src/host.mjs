@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { defaultClaudeDir, regimeParams, detectTtlRegime, decideInject, transcriptIdleMs, looksLikeTrustPrompt } from './keepalive.mjs';
+import { defaultClaudeDir, regimeParams, detectTtlRegime, decideInject, transcriptIdleMs, looksLikeTrustPrompt, detectBillingMode } from './keepalive.mjs';
 
 const require = createRequire(import.meta.url);
 const isWin = process.platform === 'win32';
@@ -83,7 +83,23 @@ export function startHost(opts = {}) {
 
   let lastFire = 0;
   let trustGuardLogged = false;
+  let creditsGuardLogged = false;
   const timer = setInterval(() => {
+    // credits / API 計費（/login 切到 Console 帳號、或只用 ANTHROPIC_API_KEY）時，每次注入
+    // 都是實際花錢，保溫沒有意義 → 自動暫停。每個 tick 重新偵測，session 中 /login 切回
+    // 訂閱帳號會自動恢復保溫。要強制指定：CWARM_BILLING=subscription|credits。
+    const billing = detectBillingMode(claudeDir);
+    if (billing === 'credits') {
+      if (!creditsGuardLogged) {
+        creditsGuardLogged = true;
+        try { fs.appendFileSync(LOG, `${new Date().toISOString()} skip: credits/API billing detected — keepalive suspended (CWARM_BILLING=subscription to override)\n`); } catch {}
+      }
+      return;
+    }
+    if (creditsGuardLogged) {
+      creditsGuardLogged = false;
+      try { fs.appendFileSync(LOG, `${new Date().toISOString()} resume: subscription billing detected — keepalive re-enabled\n`); } catch {}
+    }
     // 信任對話框在畫面上時，這輪完全不動作（連 Esc 都不送）——那是使用者本人該回答的框，被保溫
     // Esc 掉會留下 hasTrustDialogAccepted:false，害該資料夾 settings.local.json 權限失效、之後不再跳框。
     if (looksLikeTrustPrompt(screenBuf)) {

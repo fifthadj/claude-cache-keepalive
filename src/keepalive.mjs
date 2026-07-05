@@ -126,6 +126,43 @@ export function detectTtlRegime(claudeDir, cwd, opts) {
   return readTtlRegime(transcriptPath(claudeDir, cwd), opts);
 }
 
+// ---- 計費模式偵測（subscription vs credits/API）----
+// 保溫只在「訂閱制」下划算：額度是 rate limit，cache 保溫省的是額度。若 /login 切到
+// Console 帳號（credits / API 計費），每次注入的 "hi" 與 cache 續寫都是實際花錢，
+// 保溫反而燒錢 → 偵測到 credits 就自動暫停注入。
+// 判斷順序：CWARM_BILLING 強制指定 → .credentials.json 的 claudeAiOauth.subscriptionType
+// （/login 當下就會改寫，最即時）→ .claude.json 的 oauthAccount.billingType →
+// ANTHROPIC_API_KEY 環境變數 → null（無法判斷，維持現行行為照常保溫）。
+export function billingModeFromSources({ env = {}, credentials = null, config = null } = {}) {
+  const forced = String(env.CWARM_BILLING || '').toLowerCase();
+  if (forced === 'subscription' || forced === 'credits') return forced;
+  const oauth = credentials && credentials.claudeAiOauth;
+  if (oauth && typeof oauth === 'object') {
+    const sub = oauth.subscriptionType;
+    if (typeof sub === 'string' && /^(pro|max|team|enterprise)/i.test(sub)) return 'subscription';
+    return 'credits'; // 有 OAuth 登入但沒有訂閱層級 → Console 帳號（credits 計費）
+  }
+  const billing = config && config.oauthAccount && config.oauthAccount.billingType;
+  if (billing === 'stripe_subscription') return 'subscription';
+  if (typeof billing === 'string' && billing) return 'credits';
+  if (env.ANTHROPIC_API_KEY) return 'credits'; // 沒有任何登入痕跡、只有 API key → 純 API 計費
+  return null;
+}
+
+function readJsonSafe(p) {
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
+}
+
+// IO 版：讀 claudeDir 下的 .credentials.json 與 .claude.json（CLAUDE_CONFIG_DIR 佈局），
+// 後者找不到再退回 homedir 的 ~/.claude.json（預設佈局）。macOS 憑證在 Keychain、
+// 沒有 .credentials.json 檔，會自然落到 config 判斷。
+export function detectBillingMode(claudeDir, { env = process.env, homedir = os.homedir() } = {}) {
+  const credentials = readJsonSafe(path.join(claudeDir, '.credentials.json'));
+  const config = readJsonSafe(path.join(claudeDir, '.claude.json'))
+    ?? readJsonSafe(path.join(homedir, '.claude.json'));
+  return billingModeFromSources({ env, credentials, config });
+}
+
 // 純決策：現在該不該注入 keepalive？idleMs = 距上次訊息多久（由 transcriptIdleMs 算）。
 // screenIdleMs = 距 claude 最近一次「畫面輸出」多久；quietMs = 需靜止多久才放行。
 // 為什麼要這個畫面靜默門檻：transcript 在「等你回答必答提示（權限/選單/計畫批准）」與

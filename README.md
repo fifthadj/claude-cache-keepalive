@@ -76,6 +76,7 @@ Environment variables (mostly for testing / advanced use):
 | `CWARM_ESC_DELAY_MS` | gap between the `Esc` and the keepalive message (default `250`) |
 | `CWARM_THRESHOLD_S` | override idle threshold (seconds) |
 | `CWARM_TTL_S` | override cooldown (seconds) |
+| `CWARM_BILLING` | force billing mode: `subscription` (keep warming) or `credits` (suspend); otherwise auto‑detected |
 | `CWARM_CLAUDE` | path to the `claude` executable (otherwise auto‑detected via `which`/`where`) |
 | `CLAUDE_CONFIG_DIR` | Claude config dir (default `~/.claude`) |
 
@@ -126,6 +127,7 @@ Environment variables (mostly for testing / advanced use):
 | `CWARM_ESC_DELAY_MS` | `Esc` 與訊息之間的間隔（預設 `250`） |
 | `CWARM_THRESHOLD_S` | 覆寫閒置門檻（秒） |
 | `CWARM_TTL_S` | 覆寫冷卻（秒） |
+| `CWARM_BILLING` | 強制指定計費模式：`subscription`（照常保溫）或 `credits`（暫停）；否則自動偵測 |
 | `CWARM_CLAUDE` | `claude` 執行檔路徑（否則用 `which`／`where` 自動偵測） |
 | `CLAUDE_CONFIG_DIR` | Claude 設定目錄（預設 `~/.claude`） |
 
@@ -136,6 +138,10 @@ Environment variables (mostly for testing / advanced use):
 - **macOS**：同樣的跨平台機制（node-pty ＋ 你 shell 裡的 `claude`）；預期可用，尚未實測，歡迎回報。
 
 ## Changelog
+
+### 0.1.9
+- **Fix:** keepalive now **auto-suspends on credits/API billing**. If you `/login` into an Anthropic Console account (credits usage) — or run purely on `ANTHROPIC_API_KEY` — every injected `hi` and every cache refresh costs real money, so warming the cache no longer makes sense (on a subscription it only spends rate-limit quota). cwarm now detects the billing mode each tick (from `~/.claude/.credentials.json`'s `claudeAiOauth.subscriptionType`, falling back to `~/.claude.json`'s `oauthAccount.billingType`, then the `ANTHROPIC_API_KEY` env var) and skips injection while on credits, logging `skip: credits/API billing detected` once; switching back to a subscription account mid-session resumes warming automatically. Override with `CWARM_BILLING=subscription|credits` if detection guesses wrong. Adds `billingModeFromSources` / `detectBillingMode`.
+- **修正：** keepalive 現在會在 **credits／API 計費時自動暫停**。若你用 `/login` 切到 Anthropic Console 帳號（credits usage），或純靠 `ANTHROPIC_API_KEY` 執行，每次注入的 `hi` 與每次 cache 續寫都是實際花錢，保溫就失去意義（訂閱制下花的只是額度）。cwarm 現在每個 tick 偵測計費模式（先看 `~/.claude/.credentials.json` 的 `claudeAiOauth.subscriptionType`，再退回 `~/.claude.json` 的 `oauthAccount.billingType`，最後看 `ANTHROPIC_API_KEY` 環境變數），credits 期間跳過注入並記錄一次 `skip: credits/API billing detected`；session 中切回訂閱帳號會自動恢復保溫。偵測誤判可用 `CWARM_BILLING=subscription|credits` 強制指定。新增 `billingModeFromSources`／`detectBillingMode`。
 
 ### 0.1.8
 - **Fix:** the keepalive's `Esc`‑prefix (added in 0.1.5) could dismiss Claude Code's **folder‑trust dialog** ("Do you trust the files in this folder?"). Since 0.1.7 dropped the implicit `--continue`, bare `cwarm` starts a *fresh* session, so an untrusted directory shows the trust dialog on launch; if you stepped away past the idle threshold, the keepalive's `Esc` cancelled it — which writes `hasTrustDialogAccepted: false` into `~/.claude.json` and makes that folder's `.claude/settings.local.json` permissions silently ignored (the "Ignoring N permissions.allow entries: this workspace has not been trusted" warning you only see after `/exit` restores the normal screen). The keepalive now detects the trust dialog on screen and **skips the whole tick** (no `Esc`, no message), leaving it for you to answer; all other mandatory prompts keep the 0.1.5 `Esc` behaviour. Adds `looksLikeTrustPrompt`.

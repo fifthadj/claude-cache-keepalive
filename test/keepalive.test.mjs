@@ -7,6 +7,7 @@ import {
   decideInject, regimeParams, REGIME_PARAMS,
   encodeProjectDir, transcriptIdleMs, transcriptPath,
   readTtlRegime, detectTtlRegime, looksLikeTrustPrompt,
+  billingModeFromSources, detectBillingMode,
 } from '../src/keepalive.mjs';
 
 const NOW = 1_000_000_000_000;
@@ -125,6 +126,70 @@ test('trust prompt: false for an ordinary idle input box / other prompts', () =>
   assert.equal(looksLikeTrustPrompt(''), false);
   assert.equal(looksLikeTrustPrompt(null), false);
   assert.equal(looksLikeTrustPrompt(undefined), false);
+});
+
+// ---- billing mode (subscription keeps keepalive; credits/API suspends it) ----
+test('billing: subscription tiers in credentials -> subscription', () => {
+  for (const sub of ['pro', 'max', 'team', 'enterprise', 'max_5x']) {
+    assert.equal(billingModeFromSources({ credentials: { claudeAiOauth: { subscriptionType: sub } } }), 'subscription', sub);
+  }
+});
+
+test('billing: oauth login without a subscription tier -> credits (console account)', () => {
+  assert.equal(billingModeFromSources({ credentials: { claudeAiOauth: { subscriptionType: null } } }), 'credits');
+  assert.equal(billingModeFromSources({ credentials: { claudeAiOauth: {} } }), 'credits');
+  assert.equal(billingModeFromSources({ credentials: { claudeAiOauth: { subscriptionType: 'none' } } }), 'credits');
+});
+
+test('billing: credentials outrank config (login rewrites credentials first)', () => {
+  assert.equal(billingModeFromSources({
+    credentials: { claudeAiOauth: { subscriptionType: 'pro' } },
+    config: { oauthAccount: { billingType: 'prepaid' } },
+  }), 'subscription');
+});
+
+test('billing: config billingType fallback when no credentials file (e.g. macOS keychain)', () => {
+  assert.equal(billingModeFromSources({ config: { oauthAccount: { billingType: 'stripe_subscription' } } }), 'subscription');
+  assert.equal(billingModeFromSources({ config: { oauthAccount: { billingType: 'prepaid' } } }), 'credits');
+});
+
+test('billing: ANTHROPIC_API_KEY alone -> credits; unknown -> null (keepalive stays on)', () => {
+  assert.equal(billingModeFromSources({ env: { ANTHROPIC_API_KEY: 'sk-ant-x' } }), 'credits');
+  assert.equal(billingModeFromSources({}), null);
+  assert.equal(billingModeFromSources({ credentials: {}, config: {} }), null);
+});
+
+test('billing: CWARM_BILLING override wins over everything', () => {
+  assert.equal(billingModeFromSources({
+    env: { CWARM_BILLING: 'subscription', ANTHROPIC_API_KEY: 'sk' },
+    credentials: { claudeAiOauth: { subscriptionType: null } },
+  }), 'subscription');
+  assert.equal(billingModeFromSources({
+    env: { CWARM_BILLING: 'credits' },
+    credentials: { claudeAiOauth: { subscriptionType: 'max' } },
+  }), 'credits');
+});
+
+test('detectBillingMode: reads .credentials.json under claudeDir', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-b-'));
+  fs.writeFileSync(path.join(dir, '.credentials.json'),
+    JSON.stringify({ claudeAiOauth: { subscriptionType: 'pro' } }));
+  assert.equal(detectBillingMode(dir, { env: {}, homedir: dir }), 'subscription');
+  fs.writeFileSync(path.join(dir, '.credentials.json'),
+    JSON.stringify({ claudeAiOauth: { subscriptionType: null } }));
+  assert.equal(detectBillingMode(dir, { env: {}, homedir: dir }), 'credits');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('detectBillingMode: falls back to ~/.claude.json, and to null when nothing exists', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-b-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-h-'));
+  fs.writeFileSync(path.join(home, '.claude.json'),
+    JSON.stringify({ oauthAccount: { billingType: 'stripe_subscription' } }));
+  assert.equal(detectBillingMode(dir, { env: {}, homedir: home }), 'subscription');
+  assert.equal(detectBillingMode(dir, { env: {}, homedir: fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-e-')) }), null);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(home, { recursive: true, force: true });
 });
 
 // ---- encode / transcript path + idle ----
