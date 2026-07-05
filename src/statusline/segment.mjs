@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { defaultClaudeDir, readTtlRegime, regimeParams } from '../keepalive.mjs';
+import { defaultClaudeDir, readTtlRegime, regimeParams, detectBillingMode } from '../keepalive.mjs';
 
 const claudeDir = defaultClaudeDir();
 const ORIG = path.join(claudeDir, 'cwarm-statusline-orig.json');
@@ -15,6 +15,8 @@ function readStdin() {
 
 // cache 倒數段：用 transcript mtime 當 idle、用 transcript 實測的 cache_creation 判 TTL（1h / 5m）。
 function cacheSegment(payload) {
+  // credits/API 計費時 keepalive 已暫停，倒數沒有意義且會誤導 → 顯示暫停標記
+  if (detectBillingMode(claudeDir) === 'credits') return '⏸️ cwarm off (API)';
   const tp = payload?.transcript_path;
   if (!tp) return '';
   let mtimeMs;
