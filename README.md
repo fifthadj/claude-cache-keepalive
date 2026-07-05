@@ -139,6 +139,10 @@ Environment variables (mostly for testing / advanced use):
 
 ## Changelog
 
+### 0.1.10
+- **Fix:** the optional statusline segment now reflects the 0.1.9 billing guard. On credits/API billing the keepalive is suspended, but the `♻️ cache …` countdown kept ticking as if warming were still active — misleading. The segment now shows `⏸️ cwarm off (API)` while `detectBillingMode` reports credits, and returns to the normal countdown once you're back on a subscription account.
+- **修正：** 選配的 statusline 區段現在會反映 0.1.9 的計費防護。credits／API 計費時 keepalive 已暫停，但 `♻️ cache …` 倒數仍照跑，彷彿還在保溫——會造成誤導。現在 `detectBillingMode` 回報 credits 期間會改顯示 `⏸️ cwarm off (API)`，切回訂閱帳號後自動恢復正常倒數。
+
 ### 0.1.9
 - **Fix:** keepalive now **auto-suspends on credits/API billing**. If you `/login` into an Anthropic Console account (credits usage) — or run purely on `ANTHROPIC_API_KEY` — every injected `hi` and every cache refresh costs real money, so warming the cache no longer makes sense (on a subscription it only spends rate-limit quota). cwarm now detects the billing mode each tick (from `~/.claude/.credentials.json`'s `claudeAiOauth.subscriptionType`, falling back to `~/.claude.json`'s `oauthAccount.billingType`, then the `ANTHROPIC_API_KEY` env var) and skips injection while on credits, logging `skip: credits/API billing detected` once; switching back to a subscription account mid-session resumes warming automatically. Override with `CWARM_BILLING=subscription|credits` if detection guesses wrong. Adds `billingModeFromSources` / `detectBillingMode`.
 - **修正：** keepalive 現在會在 **credits／API 計費時自動暫停**。若你用 `/login` 切到 Anthropic Console 帳號（credits usage），或純靠 `ANTHROPIC_API_KEY` 執行，每次注入的 `hi` 與每次 cache 續寫都是實際花錢，保溫就失去意義（訂閱制下花的只是額度）。cwarm 現在每個 tick 偵測計費模式（先看 `~/.claude/.credentials.json` 的 `claudeAiOauth.subscriptionType`，再退回 `~/.claude.json` 的 `oauthAccount.billingType`，最後看 `ANTHROPIC_API_KEY` 環境變數），credits 期間跳過注入並記錄一次 `skip: credits/API billing detected`；session 中切回訂閱帳號會自動恢復保溫。偵測誤判可用 `CWARM_BILLING=subscription|credits` 強制指定。新增 `billingModeFromSources`／`detectBillingMode`。
