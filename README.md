@@ -64,6 +64,57 @@ cwarm setup --remove   # restores your previous statusline
 
 (Written in Node — no Python dependency, no Windows codepage issues.)
 
+## Unattended AI mode (opt-in, off by default)
+
+Plain keepalive only sends `hi` — harmless, but it doesn't make idle time *useful*. `--ai` mode does: once cwarm decides you've genuinely stepped away, instead of `hi` it starts feeding Claude a repeating checklist of safe, self-verifying work (review the session, sweep for TODOs, add missing tests, sync docs, distill lessons into memory, …), so idle windows turn into progress instead of dead air.
+
+### How it decides "you're gone"
+
+- Two consecutive keepalive pings pass with **zero human keystrokes** in between → the third one switches from `hi` to the first step of the work cycle.
+- Typing anything — even a single keystroke — resets it straight back to plain `hi`. Bracketed-paste and Windows' `win32-input-mode` batch-paste packets are recognized as what they are, so a large paste can never be mistaken for real typing, for the toggle hotkey, or corrupted in transit.
+- A configurable quiet window (`CWARM_HUMAN_QUIET_S`, default 5 min) blocks injection entirely right after you type, so a half-finished draft you paused to think about can't get Enter-submitted by an untimely `hi`.
+- The very first instruction of each fresh unattended stretch is prefixed with a one-time briefing telling Claude *why* it's receiving this — that cwarm is driving, not its own initiative, what the safety rules are, and that real human input always overrides it.
+
+### How it paces itself
+
+- **5-hour window:** below `CWARM_AI_FAST_PCT` (default 70%) usage and no other quota concern → fast pace (`CWARM_AI_PACE_S`, default 5 min) instead of waiting a full cache-TTL between injections, so the checklist actually gets somewhere. Above that — or once you're within an hour of the hard limit — it backs off; once you're actually rate-limited it stops injecting entirely and waits for the window to reset.
+- **7-day window:** pro-rated against a flat daily budget (100%/7 ≈ 14.3%/day, with one day of grace). Running ahead of that pace pauses AI-mode work (falls back to plain `hi`) so a long unattended stretch can't burn a week's quota in a day.
+- Once a quota window resets, the next injection is a plain `go on` instead of the next checklist step — resuming both the cache and whatever task was interrupted — unless you've already come back and sent something yourself.
+
+### Should you turn it on?
+
+Turn it **on** if: you're fine with Claude doing small, verifiable maintenance work (reviews, tests, docs, refactors) on its own while you're away, you trust the built-in bounds (no deploys, no destructive operations, no large new scope — see the cycle below), and you want idle time to produce something instead of just a warm cache.
+
+Leave it **off** (the default) if: you only want the cache kept warm and nothing else to happen; you're on a tight quota and don't want background token spend; the session touches anything sensitive or production-adjacent where you'd rather nothing runs without you watching; or you simply haven't reviewed what the built-in checklist does yet.
+
+### Turning it on/off
+
+```sh
+cwarm --ai              # on for this run
+CWARM_AI=1 cwarm        # same, via env var
+```
+
+Or toggle **live**, anytime, with `Ctrl+\` (rebindable — see `CWARM_TOGGLE_KEY` below; useful if your IME steals the default). The toggle is **persisted per project** and survives restarts — `--ai` / `CWARM_AI=0` override the remembered state on the next launch. Current state shows in the statusline: `🤖AI on (Ctrl+\)`.
+
+### The built-in cycle
+
+18 steps, repeating: review → critical review → TODO/FIXME sweep → propose an improvement list → execute the safest items → test coverage → mutation-check the tests → error-handling audit → light security self-check → dependency health check (report only, no upgrades) → performance low-hanging fruit → small refactors → cross-platform review → sync docs → verify the README quickstart → devil's-advocate a design decision → distill lessons into project memory → wrap up with a report + decision queue. Every step is scoped to be safe, bounded, and verifiable — no deploys, no destructive operations, no large new work.
+
+Replace it entirely with your own, or tune the pacing:
+
+| Var | Meaning |
+|-----|---------|
+| `CWARM_AI` | `1`/`on`/`true`/`yes` to force on, `0`/`off` to force off (overrides the persisted toggle) |
+| `CWARM_AI_MSG` | send this single fixed message instead of the cycle |
+| `CWARM_AI_MSG_FILE` | path to a file with one instruction per line (`#` = comment) — swap out the whole cycle, e.g. for writing/research/translation work instead of software engineering |
+| `CWARM_TOGGLE_KEY` | rebind the hotkey from `Ctrl+\` to `Ctrl+<char>` |
+| `CWARM_HUMAN_QUIET_S` | seconds of silence required after a keystroke before injecting again (default `300`) |
+| `CWARM_AI_PACE_S` | fast-pace interval in seconds when quota allows (default `300`) |
+| `CWARM_AI_FAST_PCT` | 5h-usage ceiling below which fast pace applies (default `70`) |
+| `CWARM_RESUME_MSG` | override the post-quota-reset resume message (default `go on`) |
+
+Everything is logged to `~/.claude/cwarm-keepalive.log` — which step fired, why (or why not), and the quota state at the time — so you can audit what happened while you were away.
+
 ## Configuration
 
 Environment variables (mostly for testing / advanced use):
@@ -115,6 +166,57 @@ Environment variables (mostly for testing / advanced use):
 - **提示安全注入**：keepalive 只在 PTY **靜止一小段時間後**才觸發（`CWARM_QUIET_MS`，預設 2.5 秒）。必答提示（工具權限、`AskUserQuestion`、計畫批准）的 spinner 會一直動，忙著跑工具時也持續輸出，兩者都「不安靜」，所以 keepalive 不會送進去（不會誤選選單預設項、也不會打斷長工具執行）。而且注入時會**先送 `Esc`** 退回輸入框，那個 Enter 永遠落不到提示上。（提示真的卡住時 cache 本來就無法保溫，等你回答後會自動恢復。）
 - **與焦點／縮小無關**：注入是行程內部的 `pty.write`，跟視窗狀態無關。只有關閉視窗（結束 host 行程）才會停。
 
+### 無人值守 AI 模式（選配，預設關）
+
+純保溫只會送 `hi`——無害，但沒讓閒置時間產生任何價值。`--ai` 模式會：一旦 cwarm 判定你真的離開了，就不再送 `hi`，改成餵給 Claude 一組循環式的安全自我驗證工作（檢視這個 session、掃 TODO、補缺的測試、同步文件、把心得寫進 memory……），讓閒置視窗變成實際進度，而不只是空白等待。
+
+**怎麼判定「你不在了」**
+
+- 連續兩發保溫都完全沒有人為鍵盤輸入 → 第三發起，從 `hi` 改敲工作循環的第一步。
+- 只要打了任何一個字（哪怕只有一個按鍵），就立刻歸零回到普通 `hi`。Bracketed-paste 與 Windows 的 `win32-input-mode` 批次貼上封包都會被正確識別，大量貼上內容不會被誤判成真人打字、不會誤觸切換熱鍵，也不會在轉送過程中被毀損。
+- 可調的靜默窗（`CWARM_HUMAN_QUIET_S`，預設 5 分鐘）在你剛打完字之後完全封鎖注入——避免你停下來想事情時，半句沒送出的草稿被一發不合時宜的 `hi` 連 Enter 一起送出去。
+- 每一輪全新的無人值守，第一句指令都會附上一次性簡報，跟 Claude 說明「為什麼會收到這句」——這是 cwarm 在驅動，不是它自己的主動行為，安全規則是什麼，以及真人輸入永遠優先於這些指令。
+
+**怎麼配速**
+
+- **5 小時視窗：**用量低於 `CWARM_AI_FAST_PCT`（預設 70%）且沒有其他額度疑慮 → 用快節奏（`CWARM_AI_PACE_S`，預設 5 分鐘），不必每次都空等一整個 cache TTL，循環才推得動。超過這個門檻、或離硬性上限不到一小時，就退回原節奏；真的撞到額度上限就整個暫停注入，等視窗重置。
+- **7 天視窗：**按時間比例攤成一條日均進度線（100%/7 ≈ 14.3%/天，留一天緩衝）。用量跑到進度線前面就暫停 AI 工作（退回普通 `hi`），避免一段長時間的無人值守把一整週的額度燒穿。
+- 額度視窗重置後，下一發改敲普通的 `go on` 而不是循環的下一步——同時回溫 cache 與接續被額度打斷的任務——除非你自己已經先回來發了訊息。
+
+**要不要開？**
+
+**開**的情境：你能接受 Claude 在你不在時做一些小而可驗證的維護工作（檢視、測試、文件、重構），信任內建的邊界（不部署、不做破壞性操作、不擴大範圍——見下方循環內容），而且希望閒置時間能產出東西，不只是保溫。
+
+**維持關**（預設）的情境：你只想保溫、不想有任何額外動作；額度吃緊、不想有背景耗用；這個 session 涉及敏感或接近正式環境的內容，寧可沒人看著就什麼都不跑；或者你還沒看過內建循環到底會做什麼。
+
+**開關方式**
+
+```sh
+cwarm --ai              # 這次啟動就開
+CWARM_AI=1 cwarm        # 效果相同，走環境變數
+```
+
+或執行中隨時按 `Ctrl+\` **即時切換**（可換鍵，見下方 `CWARM_TOGGLE_KEY`；IME 搶走預設鍵時很有用）。切換狀態**依專案持久化**、重啟沿用——`--ai` / `CWARM_AI=0` 會覆蓋下次啟動時記住的狀態。目前狀態顯示在 statusline：`🤖AI on (Ctrl+\)`。
+
+**內建循環**
+
+18 步循環：review → 批判 review → TODO/FIXME 掃描 → 提出改進清單 → 執行最安全的項目 → 測試覆蓋 → mutation check（測試有效性）→ 錯誤處理稽核 → 輕量資安自查 → 相依套件體檢（只報告不升級）→ 效能低垂果實 → 小步重構 → 跨平台審視 → 文件同步 → README 快速上手驗證 → 對照方案探索 → 心得蒸餾進 project memory → 收尾報告＋決策佇列。每一步都刻意設計成安全、有界、可驗證——不部署、不做破壞性操作、不展開大型新工作。
+
+想整套換掉、或調節奏，可用：
+
+| 變數 | 意義 |
+|-----|------|
+| `CWARM_AI` | `1`/`on`/`true`/`yes` 強制開、`0`/`off` 強制關（覆蓋持久化狀態） |
+| `CWARM_AI_MSG` | 改成固定敲這一句，取代整套循環 |
+| `CWARM_AI_MSG_FILE` | 自訂指令檔路徑，一行一條（`#` 開頭為註解）——整套換掉，例如換成寫作／研究／翻譯而非軟體工程 |
+| `CWARM_TOGGLE_KEY` | 把熱鍵從 `Ctrl+\` 換成 `Ctrl+<字元>` |
+| `CWARM_HUMAN_QUIET_S` | 敲鍵後需靜默幾秒才可再注入（預設 `300`） |
+| `CWARM_AI_PACE_S` | 額度充裕時的快節奏間隔秒數（預設 `300`） |
+| `CWARM_AI_FAST_PCT` | 5h 用量低於此值才套用快節奏（預設 `70`） |
+| `CWARM_RESUME_MSG` | 覆寫額度重置後的續跑訊息（預設 `go on`） |
+
+所有動作都會記進 `~/.claude/cwarm-keepalive.log`——哪一步觸發、為什麼（或為什麼沒有）、當下的額度狀態——回來後可以稽核你不在的這段時間發生了什麼。
+
 ### 設定
 
 環境變數（多為測試／進階用途）：
@@ -138,6 +240,12 @@ Environment variables (mostly for testing / advanced use):
 - **macOS**：同樣的跨平台機制（node-pty ＋ 你 shell 裡的 `claude`）；預期可用，尚未實測，歡迎回報。
 
 ## Changelog
+
+### 0.1.12
+- **Feature:** each fresh unattended stretch now opens with a one-time **briefing message** — the first checklist step of a new round (after human activity resets the cycle) is prefixed with a short explanation telling Claude that cwarm's AI mode is driving, why it's receiving instructions with no request from the user, how the quota pacing works, that a real human message always overrides it, and the built-in safety bounds. Mid-cycle wraparounds within the same unattended stretch don't repeat it. Implemented as a pure, tested `pickInjectMsg` option — no duplicated logic in the host loop.
+- **Docs:** added a full **"Unattended AI mode"** section (English + 繁體中文) covering how it detects you've stepped away, how it paces itself against your 5h/weekly quota, when to turn it on vs. leave it off, how to toggle it, the built-in 18-step cycle, and every `CWARM_AI_*` config knob — previously this was only in `cwarm help` and the changelog, with no standalone explanation.
+- **功能：** 每一輪全新的無人值守，開頭第一步（使用者活動歸零後、重新進入無人值守時）現在會附上一次性**簡報訊息**，跟 Claude 說明 cwarm 的 AI 模式正在驅動、為什麼會平白收到指令、額度配速怎麼運作、真人訊息永遠優先於這些指令、以及內建的安全邊界。同一輪無人值守中途繞圈不會重複附加。實作成 `pickInjectMsg` 的一個純函式選項（有測試涵蓋），host 迴圈裡沒有重複判斷邏輯。
+- **文件：** 新增完整的**「無人值守 AI 模式」**專節（英文＋繁體中文），涵蓋怎麼判定「你不在了」、怎麼依 5 小時／週額度配速、什麼時候該開／該關、怎麼切換、內建 18 步循環內容、以及每一個 `CWARM_AI_*` 設定變數——先前這些只在 `cwarm help` 與 changelog 裡零散提過，沒有獨立完整說明。
 
 ### 0.1.11
 - **Feature:** opt-in **unattended AI mode** (`cwarm --ai`, or `CWARM_AI=1`, or press `Ctrl+\` anytime to toggle — state persists per project and shows in the statusline). After two keepalive pings with no human keystrokes, cwarm injects a cycling set of safe work instructions (review → tests → docs → …) instead of plain `hi`, pacing itself by your 5h and weekly quota headroom (a bridge file written by the statusline feeds the host live `rate_limits`, since the host process can't see the statusline payload directly). Customize the cycle with `CWARM_AI_MSG` (single message) or `CWARM_AI_MSG_FILE` (one instruction per line, `#` = comment). Statusline also gains an account/plan segment (`👤you·Max 5x`, useful when switching accounts with `/login`) and a 95%-quota warning.
