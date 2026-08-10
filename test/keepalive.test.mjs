@@ -5,9 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   decideInject, regimeParams, REGIME_PARAMS,
-  encodeProjectDir, transcriptIdleMs, transcriptPath,
+  encodeProjectDir, cwdKey, transcriptIdleMs, transcriptPath,
   readTtlRegime, detectTtlRegime, looksLikeTrustPrompt,
   billingModeFromSources, detectBillingMode,
+  accountInfoFromSources, detectAccountInfo,
+  usageState, readUsageBridge, usageBridgePath,
+  looksLikeHumanInput, pickInjectMsg, aiPacing, weeklyGate, readAiMsgFile,
+  aiStatePath, readAiState, extractAiToggle, clampHumanQuiet, readAuthSources, toggleKeySpec,
+  initialAiEnabled,
 } from '../src/keepalive.mjs';
 
 const NOW = 1_000_000_000_000;
@@ -181,6 +186,313 @@ test('detectBillingMode: reads .credentials.json under claudeDir', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// ---- usage window state (95% 提醒 / 撞牆 / reset) ----
+test('usageState: thresholds and transitions', () => {
+  const t0 = 1_000_000; // resets_at
+  // normal：低用量
+  assert.equal(usageState({ usedPct: 50, resetsAt: t0, nowSec: t0 - 3 * 3600 }), 'normal');
+  // warn：≥95% 且離 reset 超過 1h
+  assert.equal(usageState({ usedPct: 95, resetsAt: t0, nowSec: t0 - 3 * 3600 }), 'warn');
+  assert.equal(usageState({ usedPct: 96, resetsAt: t0, nowSec: t0 - 3700 }), 'warn');
+  // ≥95% 但離 reset 不滿 1h → 照常跑到撞牆（normal）
+  assert.equal(usageState({ usedPct: 96, resetsAt: t0, nowSec: t0 - 1800 }), 'normal');
+  // limited：撞牆
+  assert.equal(usageState({ usedPct: 99, resetsAt: t0, nowSec: t0 - 3600 }), 'limited');
+  assert.equal(usageState({ usedPct: 100, resetsAt: t0, nowSec: t0 - 3 * 3600 }), 'limited');
+  // reset：resets_at 已過
+  assert.equal(usageState({ usedPct: 100, resetsAt: t0, nowSec: t0 + 1 }), 'reset');
+  // unknown：缺資料
+  assert.equal(usageState({ usedPct: null, resetsAt: t0, nowSec: t0 }), 'unknown');
+  assert.equal(usageState({ usedPct: 50, resetsAt: null, nowSec: t0 }), 'unknown');
+});
+
+test('usageState: custom thresholds via opts', () => {
+  const t0 = 1_000_000;
+  assert.equal(usageState({ usedPct: 80, resetsAt: t0, nowSec: t0 - 3 * 3600 }, { warnPct: 80 }), 'warn');
+  assert.equal(usageState({ usedPct: 95, resetsAt: t0, nowSec: t0 - 3 * 3600 }, { limitPct: 95 }), 'limited');
+});
+
+test('weeklyGate: pro-rata pacing line with one-day grace', () => {
+  const WEEK = 7 * 86400;
+  const t0 = 2_000_000_000; // week resets_at
+  const midWeek = t0 - WEEK / 2; // 進度線 = 50%，日均 ≈ 14.29%
+  assert.equal(weeklyGate({ usedPct: 40, resetsAt: t0, nowSec: midWeek }), 'ok', 'under the line');
+  assert.equal(weeklyGate({ usedPct: 55, resetsAt: t0, nowSec: midWeek }), 'slow', 'over line, within a daily budget');
+  assert.equal(weeklyGate({ usedPct: 65, resetsAt: t0, nowSec: midWeek }), 'off', 'over line by ≥ one daily budget');
+  // 開窗初期：進度線趨近 0，任何用量都算超前
+  assert.equal(weeklyGate({ usedPct: 20, resetsAt: t0, nowSec: t0 - WEEK + 60 }), 'off');
+  assert.equal(weeklyGate({ usedPct: 0, resetsAt: t0, nowSec: t0 - WEEK + 60 }), 'ok');
+  // 缺資料 → unknown
+  assert.equal(weeklyGate({ usedPct: null, resetsAt: t0, nowSec: midWeek }), 'unknown');
+  assert.equal(weeklyGate({ usedPct: 50, resetsAt: null, nowSec: midWeek }), 'unknown');
+});
+
+test('aiPacing: weekly slow/off blocks fast pace, ok/unknown allows it', () => {
+  const base = { consecInjects: 3, usedPct: 30, ustate: 'normal', ttl: 3600, idleThreshold: 3480 };
+  assert.equal(aiPacing({ ...base, weekly: 'ok' }).ttl, 300);
+  assert.equal(aiPacing({ ...base, weekly: 'unknown' }).ttl, 300);
+  assert.equal(aiPacing({ ...base, weekly: 'slow' }).ttl, 3600);
+  assert.equal(aiPacing({ ...base, weekly: 'off' }).ttl, 3600);
+});
+
+test('aiPacing: enabled=false (no --ai) never fast-paces', () => {
+  const base = { consecInjects: 5, usedPct: 10, ustate: 'normal', weekly: 'ok', ttl: 3600, idleThreshold: 3480 };
+  assert.equal(aiPacing({ ...base, enabled: false }).ttl, 3600);
+  assert.equal(aiPacing({ ...base, enabled: true }).ttl, 300);
+});
+
+test('readAiMsgFile: one instruction per line, skips blanks and # comments', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-m-'));
+  const f = path.join(dir, 'cycle.txt');
+  fs.writeFileSync(f, '# my writing cycle\n\nproofread the draft\n  polish chapter flow  \n# done\n');
+  assert.deepEqual(readAiMsgFile(f), ['proofread the draft', 'polish chapter flow']);
+  fs.writeFileSync(f, '# only comments\n\n');
+  assert.equal(readAiMsgFile(f), null, 'no usable lines → null (fall back to built-in)');
+  assert.equal(readAiMsgFile(path.join(dir, 'missing.txt')), null);
+  assert.equal(readAiMsgFile(null), null);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('readAiMsgFile: strips a leading UTF-8 BOM (Windows Notepad) before comment detection', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-mb-'));
+  const f = path.join(dir, 'cycle.txt');
+  fs.writeFileSync(f, '﻿# my cycle\nfirst step\nsecond step\n');
+  assert.deepEqual(readAiMsgFile(f), ['first step', 'second step'], 'BOM+# first line still treated as a comment');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('initialAiEnabled: flag > env (0 forces off) > persisted > default off', () => {
+  assert.equal(initialAiEnabled({ flagAi: true, envAi: '0', persisted: { enabled: false } }), true, '--ai wins');
+  assert.equal(initialAiEnabled({ envAi: '1', persisted: { enabled: false } }), true);
+  assert.equal(initialAiEnabled({ envAi: '0', persisted: { enabled: true } }), false, 'CWARM_AI=0 forces off over persisted on');
+  assert.equal(initialAiEnabled({ envAi: 'off', persisted: { enabled: true } }), false);
+  assert.equal(initialAiEnabled({ persisted: { enabled: true } }), true, 'persisted survives restart');
+  assert.equal(initialAiEnabled({ persisted: { enabled: false } }), false);
+  assert.equal(initialAiEnabled({}), false, 'default off');
+  assert.equal(initialAiEnabled({ persisted: null }), false);
+});
+
+test('readAiState: maxAgeMs Infinity reads stale files (persistence path)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-p-'));
+  const cwd = 'C:\\proj\\a';
+  fs.writeFileSync(aiStatePath(dir, cwd), JSON.stringify({ enabled: true, ts: Date.now() - 86_400_000 }));
+  assert.equal(readAiState(dir, cwd), null, 'heartbeat read: a day old → stale');
+  assert.deepEqual(readAiState(dir, cwd, { maxAgeMs: Infinity }), { enabled: true, key: null }, 'persistence read ignores age');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('readAiState: per-cwd file, fresh heartbeat returns flag, stale/missing → null', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-s-'));
+  const cwdA = 'C:\\proj\\a', cwdB = 'C:\\proj\\b';
+  const now = Date.now();
+  fs.writeFileSync(aiStatePath(dir, cwdA), JSON.stringify({ enabled: true, ts: now }));
+  fs.writeFileSync(aiStatePath(dir, cwdB), JSON.stringify({ enabled: false, ts: now }));
+  // 兩個 host 並行各寫各的，互不覆蓋（key 未寫時為 null，host 會寫入熱鍵標籤）
+  assert.deepEqual(readAiState(dir, cwdA, { now }), { enabled: true, key: null });
+  assert.deepEqual(readAiState(dir, cwdB, { now }), { enabled: false, key: null });
+  // 心跳過舊（host 已退出）→ null，statusline 不顯示殘留狀態
+  assert.equal(readAiState(dir, cwdA, { now: now + 61_000 }), null);
+  assert.equal(readAiState(dir, 'C:\\proj\\none', { now }), null);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('pickInjectMsg: aiAllowed=false suppresses AI mode back to plain hi', () => {
+  const m = { pendingResume: false, resumeMsg: 'go on', aiMsg: ['a', 'b'], msg: 'hi' };
+  assert.equal(pickInjectMsg({ ...m, consecInjects: 4, aiAllowed: false }), 'hi');
+  assert.equal(pickInjectMsg({ ...m, consecInjects: 4, aiAllowed: true }), 'a');
+  assert.equal(pickInjectMsg({ ...m, consecInjects: 4, pendingResume: true, aiAllowed: false }), 'go on', 'resume still wins');
+});
+
+test('readUsageBridge: reads fresh file, rejects stale or missing', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-u-'));
+  const cwd = 'C:\\proj\\u';
+  const now = Date.now();
+  fs.writeFileSync(usageBridgePath(dir, cwd), JSON.stringify({ used_percentage: 97, resets_at: 123, ts: now }));
+  assert.deepEqual(readUsageBridge(dir, cwd, { now }), { usedPct: 97, resetsAt: 123, weekPct: null, weekResetsAt: null });
+  fs.writeFileSync(usageBridgePath(dir, cwd), JSON.stringify({
+    used_percentage: 50, resets_at: 123, seven_day: { used_percentage: 33, resets_at: 456 }, ts: now,
+  }));
+  assert.deepEqual(readUsageBridge(dir, cwd, { now }), { usedPct: 50, resetsAt: 123, weekPct: 33, weekResetsAt: 456 });
+  // 太舊（statusline 停更）→ null
+  assert.equal(readUsageBridge(dir, cwd, { now: now + 601_000 }), null);
+  // 檔案不存在 → null
+  assert.equal(readUsageBridge(fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-u2-')), cwd, { now }), null);
+  // 不同 cwd 各寫各的橋接檔，不互相覆蓋（曾經全域共用一份，A 帳號會讀到 B 帳號的用量）
+  const cwd2 = 'C:\\proj\\v';
+  fs.writeFileSync(usageBridgePath(dir, cwd2), JSON.stringify({ used_percentage: 10, resets_at: 999, ts: now }));
+  assert.equal(readUsageBridge(dir, cwd, { now }).usedPct, 50, 'cwd unaffected by cwd2 write');
+  assert.equal(readUsageBridge(dir, cwd2, { now }).usedPct, 10);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ---- human typing guard ----
+test('human keystroke within humanQuietMs blocks injection; after it, allows', () => {
+  const base = { now: NOW, idleMs: ms(3500), lastFire: 0, ...LONG, disabled: false };
+  assert.equal(decideInject({ ...base, humanIdleMs: ms(10), humanQuietMs: ms(300) }), false, 'typed 10s ago');
+  assert.equal(decideInject({ ...base, humanIdleMs: ms(299), humanQuietMs: ms(300) }), false, 'still within quiet window');
+  assert.equal(decideInject({ ...base, humanIdleMs: ms(301), humanQuietMs: ms(300) }), true, 'quiet window passed');
+  assert.equal(decideInject({ ...base, humanIdleMs: null, humanQuietMs: ms(300) }), true, 'no human signal → not applied');
+  assert.equal(decideInject({ ...base, humanIdleMs: ms(10), humanQuietMs: null }), true, 'guard disabled');
+});
+
+// ---- 無人值守 AI 模式 ----
+test('looksLikeHumanInput: typing counts, terminal auto-replies (ESC-first) do not', () => {
+  assert.equal(looksLikeHumanInput(Buffer.from('a')), true);
+  assert.equal(looksLikeHumanInput(Buffer.from('\r')), true);
+  assert.equal(looksLikeHumanInput('hello'), true);
+  assert.equal(looksLikeHumanInput(Buffer.from('\x1b[6;1R')), false, 'DSR cursor report');
+  assert.equal(looksLikeHumanInput(Buffer.from('\x1b[A')), false, 'arrow key is sacrificed by design');
+  assert.equal(looksLikeHumanInput(Buffer.alloc(0)), false);
+  assert.equal(looksLikeHumanInput(null), false);
+});
+
+test('looksLikeHumanInput: win32-input-mode packets — keydown with a char is human', () => {
+  // Windows 上 node-pty 開 ?9001h：按 'a' → ESC[65;30;97;1;0;1_（Vk;Sc;Uc;Kd;Cs;Rc）
+  assert.equal(looksLikeHumanInput(Buffer.from('\x1b[65;30;97;1;0;1_')), true, "keydown 'a'");
+  assert.equal(looksLikeHumanInput(Buffer.from('\x1b[13;28;13;1;0;1_')), true, 'keydown Enter');
+  assert.equal(looksLikeHumanInput(Buffer.from('\x1b[65;30;97;0;0;1_')), false, 'keyup only');
+  assert.equal(looksLikeHumanInput(Buffer.from('\x1b[16;42;0;1;16;1_')), false, 'Shift down alone (Uc=0)');
+  // keyup + keydown 併在同一 chunk：有 keydown 即是人
+  assert.equal(looksLikeHumanInput(Buffer.from('\x1b[65;30;97;0;0;1_\x1b[66;48;98;1;0;1_')), true);
+});
+
+test('toggleKeySpec: default Ctrl+\\, rebindable, invalid falls back', () => {
+  assert.deepEqual(toggleKeySpec(undefined), { code: 0x1c, label: 'Ctrl+\\' });
+  assert.deepEqual(toggleKeySpec(']'), { code: 0x1d, label: 'Ctrl+]' });
+  assert.deepEqual(toggleKeySpec('g'), { code: 0x07, label: 'Ctrl+G' });
+  assert.deepEqual(toggleKeySpec(''), { code: 0x1c, label: 'Ctrl+\\' });
+  assert.deepEqual(toggleKeySpec(' '), { code: 0x1c, label: 'Ctrl+\\' }, 'space maps to 0 → invalid → default');
+});
+
+test('extractAiToggle: bare control byte only as a lone single-byte chunk', () => {
+  const lone = extractAiToggle(Buffer.from([0x1c])); // 預設 Ctrl+\
+  assert.equal(lone.toggled, true);
+  assert.equal(lone.rest.length, 0);
+  // 自訂 code：Ctrl+]（0x1D）
+  assert.equal(extractAiToggle(Buffer.from([0x1d]), 0x1d).toggled, true);
+  assert.equal(extractAiToggle(Buffer.from([0x1d])).toggled, false, 'non-configured byte is not the hotkey');
+  // 貼上內容夾帶 FS/GS：不得誤觸、不得剝除（透明轉送不變形）
+  const paste = Buffer.from('field1\x1cfield2\x1dfield3');
+  const r = extractAiToggle(paste);
+  assert.equal(r.toggled, false);
+  assert.deepEqual(r.rest, paste, 'paste passes through byte-identical');
+});
+
+test('extractAiToggle: win32-input-mode hotkey packets toggle and are stripped', () => {
+  // Ctrl+\ → Vk=220(0xDC)、Uc=28、Cs=8(ctrl)；down 觸發、up 一併吞掉
+  const down = '\x1b[220;43;28;1;8;1_';
+  const up = '\x1b[220;43;28;0;8;1_';
+  let r = extractAiToggle(Buffer.from(down));
+  assert.equal(r.toggled, true);
+  assert.equal(r.rest.length, 0);
+  r = extractAiToggle(Buffer.from(down + up));
+  assert.equal(r.toggled, true);
+  assert.equal(r.rest.length, 0, 'both down and up stripped');
+  r = extractAiToggle(Buffer.from(up));
+  assert.equal(r.toggled, false, 'keyup alone does not toggle');
+  assert.equal(r.rest.length, 0, 'but is still swallowed');
+  // 同 chunk 夾著別的按鍵封包（如批次貼上）：不算單鍵熱鍵，整包原樣放行、不剝除也不觸發，
+  // 避免貼上內容剛好含熱鍵字元時被誤觸且毀損。
+  const other = '\x1b[65;30;97;1;0;1_';
+  r = extractAiToggle(Buffer.from(down + other));
+  assert.equal(r.toggled, false, 'mixed with another key packet is not a lone hotkey press');
+  assert.equal(r.rest.toString('latin1'), down + other, 'passes through untouched, byte-identical');
+  // 自訂 code 時預設鍵的封包不觸發
+  r = extractAiToggle(Buffer.from(down), 0x1d);
+  assert.equal(r.toggled, false);
+  assert.equal(r.rest.toString('latin1'), down, 'non-hotkey packet passes through');
+  // 非純封包串（一般 ESC 序列 / 混合內容）原樣放行
+  const dsr = Buffer.from('\x1b[6;1R');
+  r = extractAiToggle(dsr);
+  assert.equal(r.toggled, false);
+  assert.deepEqual(r.rest, dsr);
+});
+
+test('clampHumanQuiet: keeps the early-fire margin of each regime', () => {
+  assert.equal(clampHumanQuiet(300_000, 240), 180_000, 'short: clamped to idleThreshold-60s');
+  assert.equal(clampHumanQuiet(300_000, 3480), 300_000, 'long: 300s fits, unchanged');
+  assert.equal(clampHumanQuiet(300_000, 30), 0, 'tiny threshold → guard disabled (0)');
+  assert.equal(clampHumanQuiet(0, 240), 0, 'user-disabled stays disabled');
+});
+
+test('pickInjectMsg: resume > ai(consec>=2) > plain hi', () => {
+  const m = { resumeMsg: 'go on', aiMsg: 'AI', msg: 'hi' };
+  assert.equal(pickInjectMsg({ pendingResume: true, consecInjects: 5, ...m }), 'go on', 'resume wins even in ai mode');
+  assert.equal(pickInjectMsg({ pendingResume: false, consecInjects: 0, ...m }), 'hi');
+  assert.equal(pickInjectMsg({ pendingResume: false, consecInjects: 1, ...m }), 'hi', 'second inject is still hi');
+  assert.equal(pickInjectMsg({ pendingResume: false, consecInjects: 2, ...m }), 'AI', 'third inject switches to ai');
+  assert.equal(pickInjectMsg({ pendingResume: false, consecInjects: 7, ...m }), 'AI');
+});
+
+test('pickInjectMsg: array aiMsg cycles the unattended workflow in order via aiStep', () => {
+  const cycle = ['review', 'critical', 'suggest', 'execute'];
+  const m = { pendingResume: false, resumeMsg: 'go on', aiMsg: cycle, msg: 'hi', consecInjects: 5 };
+  assert.equal(pickInjectMsg({ ...m, aiStep: 0 }), 'review');
+  assert.equal(pickInjectMsg({ ...m, aiStep: 1 }), 'critical');
+  assert.equal(pickInjectMsg({ ...m, aiStep: 2 }), 'suggest');
+  assert.equal(pickInjectMsg({ ...m, aiStep: 3 }), 'execute');
+  assert.equal(pickInjectMsg({ ...m, aiStep: 4 }), 'review', 'wraps around');
+  // aiStep 與 consecInjects 脫鉤：暫停期間送出的普通 "hi" 讓 consecInjects 累加，但只要
+  // aiStep 沒動，恢復後接著上次的步驟，不會整段跳號。
+  assert.equal(pickInjectMsg({ ...m, consecInjects: 50, aiStep: 1 }), 'critical', 'consecInjects drift does not skip steps');
+});
+
+// ---- AI 模式快節奏 ----
+test('aiPacing: fast pace only when unattended + quota headroom + normal state', () => {
+  const base = { ttl: 3600, idleThreshold: 3480 };
+  // 快跑：AI 模式、額度 <70%、狀態 normal
+  assert.deepEqual(aiPacing({ consecInjects: 2, usedPct: 30, ustate: 'normal', ...base }),
+    { ttl: 300, idleThreshold: 300 });
+  // 尚未進 AI 模式 → 原節奏
+  assert.deepEqual(aiPacing({ consecInjects: 1, usedPct: 30, ustate: 'normal', ...base }), base);
+  // 額度吃緊（≥70%）→ 原節奏
+  assert.deepEqual(aiPacing({ consecInjects: 5, usedPct: 70, ustate: 'normal', ...base }), base);
+  // 無橋接資料 → 保守原節奏
+  assert.deepEqual(aiPacing({ consecInjects: 5, usedPct: null, ustate: 'unknown', ...base }), base);
+  // warn/limited 狀態 → 原節奏（各自有既有處理）
+  assert.deepEqual(aiPacing({ consecInjects: 5, usedPct: 30, ustate: 'warn', ...base }), base);
+});
+
+test('aiPacing: pace never exceeds the regime values (short regime stays short)', () => {
+  const short = { ttl: 300, idleThreshold: 240 };
+  assert.deepEqual(aiPacing({ consecInjects: 3, usedPct: 10, ustate: 'normal', ...short, paceS: 600 }),
+    { ttl: 300, idleThreshold: 240 }, 'Math.min keeps 5m-regime pacing');
+  assert.deepEqual(aiPacing({ consecInjects: 3, usedPct: 10, ustate: 'normal', ttl: 3600, idleThreshold: 3480, paceS: 120 }),
+    { ttl: 120, idleThreshold: 120 }, 'custom faster pace applies');
+});
+
+// ---- account info (statusline 帳號段) ----
+test('account: email from config, plan from credentials, tier suffix appended', () => {
+  assert.deepEqual(accountInfoFromSources({
+    credentials: { claudeAiOauth: { subscriptionType: 'max', rateLimitTier: 'default_claude_max_5x' } },
+    config: { oauthAccount: { emailAddress: 'a@b.c' } },
+  }), { email: 'a@b.c', plan: 'Max 5x' });
+  assert.deepEqual(accountInfoFromSources({
+    credentials: { claudeAiOauth: { subscriptionType: 'pro' } },
+    config: { oauthAccount: { emailAddress: 'a@b.c' } },
+  }), { email: 'a@b.c', plan: 'Pro' });
+});
+
+test('account: missing credentials (macOS keychain) -> email only; nothing -> both null', () => {
+  assert.deepEqual(accountInfoFromSources({ config: { oauthAccount: { emailAddress: 'a@b.c' } } }),
+    { email: 'a@b.c', plan: null });
+  assert.deepEqual(accountInfoFromSources({}), { email: null, plan: null });
+  assert.deepEqual(accountInfoFromSources({ credentials: { claudeAiOauth: { subscriptionType: null } } }),
+    { email: null, plan: null });
+});
+
+test('detectAccountInfo: reads files under claudeDir with ~/.claude.json fallback', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-a-'));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-ah-'));
+  fs.writeFileSync(path.join(dir, '.credentials.json'),
+    JSON.stringify({ claudeAiOauth: { subscriptionType: 'max', rateLimitTier: 'default_claude_max_20x' } }));
+  fs.writeFileSync(path.join(home, '.claude.json'),
+    JSON.stringify({ oauthAccount: { emailAddress: 'x@y.z' } }));
+  assert.deepEqual(detectAccountInfo(dir, { homedir: home }), { email: 'x@y.z', plan: 'Max 20x' });
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
 test('detectBillingMode: falls back to ~/.claude.json, and to null when nothing exists', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-b-'));
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-h-'));
@@ -198,6 +510,23 @@ test('encodeProjectDir mirrors Claude Code path encoding', () => {
   assert.equal(encodeProjectDir('/home/u/proj'), '-home-u-proj');
 });
 
+test('cwdKey: trims a trailing slash (either direction) on every platform', () => {
+  assert.equal(cwdKey('/home/u/proj/'), cwdKey('/home/u/proj'), 'trailing / trimmed');
+  assert.equal(cwdKey('C:\\temp\\proj\\'), cwdKey('C:\\temp\\proj'), 'trailing \\ trimmed');
+});
+
+test('cwdKey: Windows-only case/slash folding — case-sensitive filesystems keep case', () => {
+  if (os.platform() === 'win32') {
+    // Windows：磁碟代號大小寫、正／反斜線都摺成同一把 key（host 與 statusline 回報的 cwd
+    // 常見只差這兩點）。
+    assert.equal(cwdKey('C:\\Temp\\Proj'), cwdKey('c:/temp/proj'));
+  } else {
+    // 類 Unix：大小寫敏感檔案系統上，/home/Alice 與 /home/alice 是兩個不同目錄，
+    // cwdKey 不可把它們摺成同一把 key，否則兩個專案的 AI 狀態/額度橋接會互相污染。
+    assert.notEqual(cwdKey('/home/Alice/proj'), cwdKey('/home/alice/proj'));
+  }
+});
+
 test('transcript idle: reads newest .jsonl mtime for the cwd project dir', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-t-'));
   const cwd = 'C:\\proj\\x';
@@ -209,6 +538,42 @@ test('transcript idle: reads newest .jsonl mtime for the cwd project dir', () =>
   fs.utimesSync(f, t, t);
   const idle = transcriptIdleMs(dir, cwd, NOW);
   assert.ok(Math.abs(idle - ms(250)) < 2000, `expected idle ~250s, got ${idle}ms`);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcript idle: sinceMs ignores transcripts older than host start (Context 0% 不保溫)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-t-'));
+  const cwd = 'C:\\proj\\x';
+  const pdir = path.join(dir, 'projects', encodeProjectDir(cwd));
+  fs.mkdirSync(pdir, { recursive: true });
+  const f = path.join(pdir, 'old-session.jsonl');
+  fs.writeFileSync(f, '{}\n');
+  const t = new Date(NOW - ms(7200)); // 上一個 session 的舊檔，兩小時前
+  fs.utimesSync(f, t, t);
+  const hostStart = NOW - ms(600); // host 十分鐘前啟動
+  assert.equal(transcriptIdleMs(dir, cwd, NOW, hostStart), null, '啟動前的舊檔不算數 → 不注入');
+  // 本 session 第一句話寫入後（mtime 晚於啟動）→ 保溫啟用
+  const t2 = new Date(NOW - ms(300));
+  fs.utimesSync(f, t2, t2);
+  const idle = transcriptIdleMs(dir, cwd, NOW, hostStart);
+  assert.ok(Math.abs(idle - ms(300)) < 2000, `expected idle ~300s, got ${idle}ms`);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcript idle: sinceMs disables the cross-project fallback (並行 session 不得誤導)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-t-'));
+  // 只有「別的專案」有 transcript，且 mtime 晚於 host 啟動（模擬另一視窗的並行 session）
+  const other = path.join(dir, 'projects', 'other-proj');
+  fs.mkdirSync(other, { recursive: true });
+  const f = path.join(other, 's.jsonl');
+  fs.writeFileSync(f, '{}\n');
+  const t = new Date(NOW - ms(100));
+  fs.utimesSync(f, t, t);
+  const hostStart = NOW - ms(600);
+  // 無 sinceMs：沿用跨專案 fallback（既有行為）
+  assert.ok(transcriptIdleMs(dir, 'C:\\proj\\empty', NOW) != null);
+  // 有 sinceMs：只認自己專案的資料夾 → null → 不注入（Context 0% 不保溫）
+  assert.equal(transcriptIdleMs(dir, 'C:\\proj\\empty', NOW, hostStart), null);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

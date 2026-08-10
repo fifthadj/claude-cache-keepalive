@@ -24,8 +24,20 @@ export function defaultClaudeDir() {
 
 // Claude Code 把 transcript 存在 ~/.claude/projects/<編碼後的 cwd>/<uuid>.jsonl，
 // 編碼規則為「非英數字元一律換成 '-'」（例：C:\temp\scripts\cwarm → C--temp-scripts-cwarm）。
+// 必須原樣比照 Claude Code 的編碼（不可正規化大小寫），否則對不上它真正建立的資料夾。
 export function encodeProjectDir(cwd) {
   return String(cwd).replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+// cwarm 自家協定檔（AI 狀態、額度橋接）的 cwd 鍵：寫入方（host 的 process.cwd()）與
+// 讀取方（statusline payload 回報的 cwd）可能只有大小寫或斜線方向不同（Windows 常見），
+// 這裡雙方都不必比對 Claude Code 的真實資料夾，故先正規化再編碼，讓這類差異不致兜不起來。
+// 大小寫/斜線方向正規化僅限 Windows：類 Unix 檔案系統多半大小寫敏感，硬轉小寫會把
+// 兩個真正不同的目錄（如 /home/Alice 與 /home/alice）錯誤地映成同一把 key，狀態互相污染。
+export function cwdKey(cwd) {
+  let s = String(cwd).replace(/[\\/]+$/, ''); // 結尾斜線（正／反皆可）先去掉，兩平台通用
+  if (os.platform() === 'win32') s = s.replace(/\//g, '\\').toLowerCase();
+  return encodeProjectDir(s);
 }
 
 // 某資料夾內 mtime 最新的 *.jsonl 完整路徑；沒有則 null。
@@ -74,9 +86,24 @@ export function transcriptMtimeMs(claudeDir, cwd) {
 // 距上次訊息（transcript 寫入）多久（毫秒）；找不到 transcript 回 null。
 // 這才是 prompt cache 年齡的正確訊號——終端「輸入」（捲動／讀回覆／打到一半沒送出）
 // 都不會刷新 cache，故不以 stdin 計時，改看 transcript mtime。
-export function transcriptIdleMs(claudeDir, cwd, now = Date.now()) {
-  const m = transcriptMtimeMs(claudeDir, cwd);
-  return m == null ? null : now - m;
+// sinceMs（通常給 host 啟動時刻）：mtime 早於它的 transcript 不算數 → 回 null。
+// 語意 = 「Context 0% 不保溫」：本 session 還沒有任何內容時沒有 cache 可保，注入無意義；
+// 也避免把上一個 session 舊檔的 mtime 誤當 idle（曾造成剛啟動就亂敲 "hi"）。
+// 第一句話寫入 transcript（Context > 0%）後，保溫自然啟用。
+// 給了 sinceMs 時**只認 cwd 自己的專案資料夾**、不走跨專案 fallback——否則別的專案
+// 有並行 session 在跑時，其 transcript mtime 晚於啟動時刻、照樣通過 sinceMs 檢查，
+// 等於借別人的活動對自己 0% context 的 session 亂敲。編碼對不上頂多 idle=null 不注入（保守正確）。
+export function transcriptIdleMs(claudeDir, cwd, now = Date.now(), sinceMs = null) {
+  let m;
+  if (sinceMs != null) {
+    const p = newestJsonlPath(path.join(claudeDir, 'projects', encodeProjectDir(cwd)));
+    try { m = p == null ? null : fs.statSync(p).mtimeMs; } catch { m = null; }
+  } else {
+    m = transcriptMtimeMs(claudeDir, cwd);
+  }
+  if (m == null) return null;
+  if (sinceMs != null && m < sinceMs) return null;
+  return now - m;
 }
 
 // 讀 transcript 尾端，判斷這個 session 實際拿到的 cache TTL 檔位。
@@ -153,14 +180,247 @@ function readJsonSafe(p) {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
 }
 
-// IO 版：讀 claudeDir 下的 .credentials.json 與 .claude.json（CLAUDE_CONFIG_DIR 佈局），
+// 讀取憑證/設定來源（billing 與 account 偵測共用，statusline 每次刷新只需讀一遍）：
+// claudeDir 下的 .credentials.json 與 .claude.json（CLAUDE_CONFIG_DIR 佈局），
 // 後者找不到再退回 homedir 的 ~/.claude.json（預設佈局）。macOS 憑證在 Keychain、
 // 沒有 .credentials.json 檔，會自然落到 config 判斷。
-export function detectBillingMode(claudeDir, { env = process.env, homedir = os.homedir() } = {}) {
+export function readAuthSources(claudeDir, { homedir = os.homedir() } = {}) {
   const credentials = readJsonSafe(path.join(claudeDir, '.credentials.json'));
   const config = readJsonSafe(path.join(claudeDir, '.claude.json'))
     ?? readJsonSafe(path.join(homedir, '.claude.json'));
+  return { credentials, config };
+}
+
+export function detectBillingMode(claudeDir, { env = process.env, homedir } = {}) {
+  const { credentials, config } = readAuthSources(claudeDir, { homedir });
   return billingModeFromSources({ env, credentials, config });
+}
+
+// ---- 帳號/訂閱偵測（statusline 顯示用）----
+// 常在兩個帳號間 /login 切換時，光看模型名不知道現在燒的是哪個帳號的額度。
+// email 取自 .claude.json 的 oauthAccount（/login 當下改寫）；訂閱層級取自
+// .credentials.json 的 claudeAiOauth.subscriptionType，rateLimitTier
+//（如 default_claude_max_5x）尾碼可再補上倍率 → "Max 5x"。
+export function accountInfoFromSources({ credentials = null, config = null } = {}) {
+  const email = (config && config.oauthAccount && config.oauthAccount.emailAddress) || null;
+  const oauth = credentials && credentials.claudeAiOauth;
+  let plan = null;
+  const sub = oauth && typeof oauth.subscriptionType === 'string' ? oauth.subscriptionType : '';
+  if (sub) {
+    plan = sub.charAt(0).toUpperCase() + sub.slice(1);
+    const m = /_(\d+x)$/.exec((oauth && oauth.rateLimitTier) || '');
+    if (m) plan += ` ${m[1]}`;
+  }
+  return { email, plan };
+}
+
+// IO 版：與 detectBillingMode 共用 readAuthSources（macOS 憑證在 Keychain 時 plan 會是 null，僅顯示 email）。
+export function detectAccountInfo(claudeDir, { homedir } = {}) {
+  return accountInfoFromSources(readAuthSources(claudeDir, { homedir }));
+}
+
+// ---- 額度視窗（5h window）狀態 ----
+// 資料來源：Claude Code 餵給 statusline 的 payload 有 rate_limits.five_hour 的
+// used_percentage / resets_at（epoch 秒），但 host 收不到 payload，故由 segment.mjs
+// 每次刷新落地成 claudeDir/cwarm-usage.json 橋接檔，host 每 tick 讀取。
+// 狀態語意：
+//   warn    — 用量 ≥ warnPct 且離 reset 還超過 warnGapS（1h）→ 提醒使用者暫時中斷；
+//             不滿 1h 就不提醒，讓尾巴額度照常燒到撞牆（反正 reset 後就作廢）
+//             （保溫照常用 "hi"，不改行為，提醒顯示在 statusline）
+//   limited — 已撞牆（≥ limitPct）→ 注入無意義，暫停等 reset
+//   reset   — 橋接檔裡的 resets_at 已過（撞牆後視窗重置）→ host 下一發改敲 "go on"
+export function usageState({ usedPct, resetsAt, nowSec }, { warnPct = 95, warnGapS = 3600, limitPct = 99 } = {}) {
+  if (usedPct == null || resetsAt == null) return 'unknown';
+  if (nowSec >= resetsAt) return 'reset';
+  if (usedPct >= limitPct) return 'limited';
+  if (usedPct >= warnPct && (resetsAt - nowSec) > warnGapS) return 'warn';
+  return 'normal';
+}
+
+// 以 cwd 編碼進檔名（同 aiStatePath）：不同帳號/專案的並行 session 各寫各的橋接檔，
+// 不會互相覆蓋彼此的額度視窗（曾經全域共用一份，A 帳號會讀到 B 帳號的用量）。
+export function usageBridgePath(claudeDir, cwd) {
+  return path.join(claudeDir, `cwarm-usage-${cwdKey(cwd)}.json`);
+}
+
+// 讀橋接檔；太舊（statusline 停更，如 claude 已關）視同沒有 → null。
+// weekPct / weekResetsAt 為 7 天視窗（rate_limits.seven_day），供週配速管控用。
+export function readUsageBridge(claudeDir, cwd, { maxAgeMs = 600_000, now = Date.now() } = {}) {
+  const o = readJsonSafe(usageBridgePath(claudeDir, cwd));
+  if (!o || typeof o !== 'object' || o.ts == null) return null;
+  if (now - o.ts > maxAgeMs) return null;
+  const sd = o.seven_day && typeof o.seven_day === 'object' ? o.seven_day : {};
+  return {
+    usedPct: o.used_percentage ?? null,
+    resetsAt: o.resets_at ?? null,
+    weekPct: sd.used_percentage ?? null,
+    weekResetsAt: sd.resets_at ?? null,
+  };
+}
+
+// ---- 週配速管控（7 天視窗）----
+// 5h 視窗管當下衝刺，7 天視窗管整週配速：週額度日均只有 100/7 ≈ 14.3%，無人值守
+// 快跑不能只看 5h 有空間。以「按時間比例均攤的進度線」為基準（開窗至今應該用掉
+// elapsed/7d × 100%）分三檔：
+//   ok   — 用量在進度線內 → 快跑無妨
+//   slow — 超線但不到一個日均量 → 退回一個 TTL 一步的慢節奏
+//   off  — 超線一個日均量以上 → 暫停 AI 工作（只剩 "hi" 純保溫），別把週額度燒穿
+// 資料缺失回 'unknown'（交由 5h 檔決策，維持既有行為）。
+export function weeklyGate({ usedPct, resetsAt, nowSec, graceDays = 1 } = {}) {
+  if (usedPct == null || resetsAt == null) return 'unknown';
+  const WEEK = 7 * 86400;
+  const elapsed = Math.min(Math.max(nowSec - (resetsAt - WEEK), 0), WEEK);
+  const expectedPct = (elapsed / WEEK) * 100;
+  const dailyPct = 100 / 7;
+  if (usedPct >= expectedPct + graceDays * dailyPct) return 'off';
+  if (usedPct > expectedPct) return 'slow';
+  return 'ok';
+}
+
+// ---- 無人值守 AI 模式 ----
+// 連續兩次注入之間完全沒有人為鍵盤輸入 → 判定無人值守，第三發起改敲「能與 AI 互動」
+// 的訊息（續推任務/回報進度），而不是傻傻的 "hi"；使用者一敲鍵就歸零回到 "hi"。
+//
+// 人為輸入判斷分兩個世界：
+// - Unix raw mode：純打字（含 Enter）不以 ESC 開頭；終端自動回報（DSR/DA 等 CSI 序列）
+//   都以 ESC 開頭 → 「首位元組不是 ESC」即是人。方向鍵等 ESC 序列被漏算可接受。
+// - Windows：node-pty 對真終端開 win32-input-mode（?9001h），**所有**按鍵都以
+//   ESC[Vk;Sc;Uc;Kd;Cs;Rc_ 封包送達（首位元組必為 ESC）。此時要解封包：
+//   key-down（Kd=1）且帶實際字元（Uc≠0）才算人——這樣終端合成的回報與 key-up 都不誤判。
+const WIN32_INPUT_PACKET_RE = /\x1b\[([0-9;]*)_/g;
+function* win32InputPackets(s) {
+  WIN32_INPUT_PACKET_RE.lastIndex = 0;
+  let m;
+  while ((m = WIN32_INPUT_PACKET_RE.exec(s)) !== null) {
+    const f = m[1].split(';').map((x) => Number(x || 0));
+    yield { vk: f[0] || 0, sc: f[1] || 0, uc: f[2] || 0, kd: f[3] || 0, raw: m[0] };
+  }
+}
+
+// Bracketed paste（\x1b[200~…\x1b[201~）一定是人為貼上——終端自動回報（DSR/DA 等）
+// 不會用這個包法送達，故不論內容為何，含這對標記即視為人為輸入，讓 humanQuiet 正確
+// 為「貼了草稿還沒送出」武裝，不會被開頭的 ESC 誤判成非人。
+const BRACKETED_PASTE_RE = /\x1b\[20[01]~/;
+
+export function looksLikeHumanInput(chunk) {
+  if (!chunk || chunk.length === 0) return false;
+  const s = typeof chunk === 'string' ? chunk : chunk.toString('latin1');
+  if (BRACKETED_PASTE_RE.test(s)) return true;
+  if (s.charCodeAt(0) !== 0x1b) return true;
+  for (const p of win32InputPackets(s)) {
+    if (p.kd === 1 && p.uc !== 0) return true; // win32-input-mode 的實際按鍵
+  }
+  return false;
+}
+
+// AI 模式切換熱鍵。預設 Ctrl+\（0x1C）——Ctrl+] 會被中文輸入法攔成全形】，故棄用；
+// CWARM_TOGGLE_KEY 給單一字元（如 ']'、'\\'、'g'）換成 Ctrl+該鍵，再撞衝突不必改 code。
+// 控制碼算法：字元碼 & 0x1F（']'→0x1D、'\'→0x1C、字母 g→0x07）。無效輸入回預設。
+export function toggleKeySpec(ch) {
+  const c = String(ch ?? '')[0] || '\\';
+  const code = c.charCodeAt(0) & 0x1f;
+  if (code < 1 || code > 31) return toggleKeySpec('\\');
+  return { code, label: `Ctrl+${c.toUpperCase()}` };
+}
+
+// 熱鍵偵測 + 剝除（code = toggleKeySpec().code）。兩種形態，都要求「這個 chunk 恰好
+// 就是熱鍵本身」才觸發，同一標準套用到 Windows：
+// - Unix raw mode：裸控制位元組——**僅當 chunk 恰為單一位元組**才視為熱鍵；
+//   貼上內容夾帶該位元組（log/CSV/條碼 dump）不得誤觸、更不得剝除毀損內容。
+// - win32-input-mode：ConPTY 對真終端永遠開著，大量貼上內容也會被轉成逐字元封包——
+//   若只挑出 Uc=code 的封包來剝除，貼上內容裡剛好含這個字元就會被誤觸且毀損。
+//   故要求**整個 chunk 解出的封包全部都是該熱鍵**（單鍵的 down(+up)，至多 2 個
+//   封包）才算熱鍵；只要混雜其他按鍵封包（含批次貼上），整包原樣放行、不觸發也不剝除。
+// 回傳 { toggled, rest }：rest 為應轉送給 claude 的剩餘位元組。
+export function extractAiToggle(chunk, code = 0x1c) {
+  const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'latin1');
+  if (buf.length === 1 && buf[0] === code) return { toggled: true, rest: Buffer.alloc(0) };
+  const s = buf.toString('latin1');
+  if (!/^(?:\x1b\[[0-9;]*_)+$/.test(s)) return { toggled: false, rest: buf };
+  const packets = [...win32InputPackets(s)];
+  if (packets.length > 0 && packets.every((p) => p.uc === code)) {
+    return { toggled: packets.some((p) => p.kd === 1), rest: Buffer.alloc(0) };
+  }
+  return { toggled: false, rest: buf }; // 混雜其他按鍵/批次貼上 → 一律原樣放行
+}
+
+// humanQuiet 門檻不得吃掉「提早注入」的保命餘裕：short 檔 idleThreshold 240s 就是為了
+// 趕在 300s TTL 前 60s 注入，若 humanQuiet 比它還長，注入會被拖到 cache 冷掉之後。
+// 故上限鉗在 idleThreshold - 60s（不足時歸零，等同不套用）。
+export function clampHumanQuiet(humanQuietMs, idleThresholdS) {
+  return Math.min(humanQuietMs, Math.max(0, idleThresholdS * 1000 - 60_000));
+}
+
+// 這一發該敲什麼：reset 後續跑 > 無人值守 AI 訊息 > 一般 "hi"。
+// aiMsg 可以是字串（固定一句）或陣列（循環工作流：第 3 發起依序輪替，如
+// review → critical review → 保守建議 → 依建議執行 → 回到 review …）。
+// aiAllowed=false（如週配速 'off'）時即使無人值守也只敲一般 "hi"，暫停 AI 工作。
+// aiStep（獨立於 consecInjects 的循環位置計數）：consecInjects 統計「連續注入次數」，
+// 用來判定是否進入無人值守（≥2），但暫停期間送出的普通 "hi" 也會讓它累加——若拿它直接
+// 當循環索引，暫停後恢復會整段跳號、破壞步驟間的依賴（如「依建議執行」承接前一步的發現）。
+// 故循環位置改用呼叫端維護、只在真的敲出 AI 循環訊息時才遞增的 aiStep。
+export function pickInjectMsg({ pendingResume, consecInjects, aiStep = 0, resumeMsg, aiMsg, msg, aiAllowed = true }) {
+  if (pendingResume) return resumeMsg;
+  if (consecInjects >= 2 && aiAllowed) {
+    if (Array.isArray(aiMsg)) return aiMsg[aiStep % aiMsg.length];
+    return aiMsg;
+  }
+  return msg;
+}
+
+// 無人值守 AI 模式的節奏：保溫節奏（一個 TTL 一發）是為省注入次數設計的，但 AI 模式
+// 的目標是推進工作——十分鐘做完一步不該空等五十分鐘。故額度充裕時改用快節奏
+//（paceS，預設 5 分鐘：transcript 靜止 + 冷卻都縮短到 paceS），下列任一條件則退回
+// 原節奏：尚未進入 AI 模式、無橋接資料（保守）、用量 ≥ fastMaxPct、或額度狀態非
+// normal（warn/limited/reset 自有其處理）。快節奏注入間隔遠小於 TTL，cache 恆熱。
+// weekly（weeklyGate 結果）：'slow'/'off' 都不快跑；'unknown' 交由 5h 條件決定。
+// enabled=false（未開 --ai/CWARM_AI，純保溫使用者）時永遠維持原節奏。
+export function aiPacing({ enabled = true, consecInjects, usedPct, ustate, weekly = 'unknown', ttl, idleThreshold, paceS = 300, fastMaxPct = 70 }) {
+  const fast = enabled
+    && consecInjects >= 2
+    && usedPct != null && usedPct < fastMaxPct
+    && ustate === 'normal'
+    && (weekly === 'ok' || weekly === 'unknown');
+  if (!fast) return { ttl, idleThreshold };
+  return { ttl: Math.min(ttl, paceS), idleThreshold: Math.min(idleThreshold, paceS) };
+}
+
+// ---- AI 模式開關狀態檔（host ↔ statusline 溝通用）----
+// host 在啟動、每個 tick、與 Ctrl+] 切換時寫入 {enabled, ts}；statusline 讀取顯示
+// 開關狀態與熱鍵提示。ts 同時是心跳——太舊代表沒有 cwarm host 在跑（或已退出），
+// statusline 就不顯示這一段（避免殘留假狀態）。
+// 以 cwd 編碼進檔名（cwarm-ai-<proj>.json）：多個 cwarm host 並行時各寫各的，
+// statusline 用 payload 的 cwd 對回自己那份，不會 last-writer-wins 互蓋。
+export function aiStatePath(claudeDir, cwd) {
+  return path.join(claudeDir, `cwarm-ai-${cwdKey(cwd)}.json`);
+}
+
+// AI 模式開機初值：--ai 旗標 > CWARM_AI 環境變數（=0/off 可強制關）> 上次持久化狀態
+//（同一個 per-cwd 狀態檔、忽略心跳時效——Ctrl+\ 切過的選擇跨重啟記住）> 預設關。
+export function initialAiEnabled({ flagAi, envAi, persisted } = {}) {
+  if (flagAi === true) return true;
+  if (envAi != null && envAi !== '') return /^(1|on|true|yes)$/i.test(String(envAi));
+  return !!(persisted && persisted.enabled);
+}
+
+export function readAiState(claudeDir, cwd, { maxAgeMs = 60_000, now = Date.now() } = {}) {
+  const o = readJsonSafe(aiStatePath(claudeDir, cwd));
+  if (!o || typeof o !== 'object' || o.ts == null) return null;
+  if (now - o.ts > maxAgeMs) return null;
+  return { enabled: !!o.enabled, key: typeof o.key === 'string' ? o.key : null };
+}
+
+// 讀自訂無人值守指令檔（CWARM_AI_MSG_FILE）：一行一條指令、# 開頭與空行忽略。
+// 內建循環是軟體工程導向的；其他領域（寫作/研究/翻譯…）用這個換掉整套。
+// 檔案不存在或沒有有效行 → null（回退內建循環）。
+export function readAiMsgFile(p) {
+  if (!p) return null;
+  let text;
+  try { text = fs.readFileSync(p, 'utf8'); } catch { return null; }
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1); // 去掉 UTF-8 BOM（Windows Notepad 常見），
+  // 否則第一行的 '#' 判斷會被隱形的 BOM 字元擋掉，該行不被當註解、悄悄混進指令循環。
+  const lines = text.split(/\r?\n/).map((s) => s.trim()).filter((s) => s && !s.startsWith('#'));
+  return lines.length ? lines : null;
 }
 
 // 純決策：現在該不該注入 keepalive？idleMs = 距上次訊息多久（由 transcriptIdleMs 算）。
@@ -170,12 +430,16 @@ export function detectBillingMode(claudeDir, { env = process.env, homedir = os.h
 // 但畫面活動可以：閒置在輸入框時畫面靜止；提示等待時 spinner 在動、生成中持續輸出。
 // 故只有畫面靜止夠久才注入——避免把 hi 的 Enter 送進 modal 誤選預設項，也避免打斷長工具執行。
 // quietMs 省略（null）時不套此門檻（保持純 idle 決策，供既有測試/呼叫者使用）。
-export function decideInject({ now, idleMs, lastFire, idleThreshold, ttl, disabled, screenIdleMs, quietMs }) {
+// humanIdleMs/humanQuietMs：距使用者最後一次敲鍵多久／需靜多久才放行。打字中途停下來
+// 想事情（畫面靜止 >quietMs）不代表人不在——半句草稿 + "hi" + Enter 一起送出就是事故。
+// 故人剛敲過鍵（預設 5 分鐘內）一律不注入；null 不套用（相容既有呼叫者）。
+export function decideInject({ now, idleMs, lastFire, idleThreshold, ttl, disabled, screenIdleMs, quietMs, humanIdleMs, humanQuietMs }) {
   if (disabled) return false;                          // 暫停開關
   if (idleMs == null) return false;                    // 找不到 transcript → 保守不發
   if (idleMs < idleThreshold * 1000) return false;     // 距上次訊息還不夠久
   if (now - lastFire < ttl * 1000) return false;       // 冷卻未滿一個 TTL
   if (quietMs != null && screenIdleMs != null && screenIdleMs < quietMs) return false; // 畫面還在動（提示/生成/打字中）
+  if (humanQuietMs != null && humanIdleMs != null && humanIdleMs < humanQuietMs) return false; // 人剛敲過鍵（可能在打字）
   return true;
 }
 

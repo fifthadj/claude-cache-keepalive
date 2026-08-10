@@ -12,7 +12,11 @@ if (first === 'setup') {
   printHelp();
   process.exit(0);
 } else {
-  startHost({ args: argv }); // 完全透傳給 claude；不帶參數就是乾淨的 claude（不再隱含 --continue）
+  // `--ai` 是 cwarm 自己的旗標（開啟無人值守 AI 模式），要在透傳前攔掉，其餘原樣給 claude。
+  // filter 在沒有 '--ai' 時本就回傳等價陣列，不必額外用三元式判斷要不要濾。
+  const ai = argv.includes('--ai');
+  const args = argv.filter((a) => a !== '--ai');
+  startHost({ args, ai }); // 完全透傳給 claude；不帶參數就是乾淨的 claude（不再隱含 --continue）
 }
 
 function printHelp() {
@@ -28,6 +32,21 @@ Usage:
 
 Everything except the 'setup' subcommand is passed straight to claude
 (e.g. \`cwarm --version\`, \`cwarm resume\`, \`cwarm -p "..."\`).
+
+Unattended AI mode (opt-in, off by default):
+  cwarm --ai [claude args]  After two keepalive pings with no human keystrokes,
+                            inject a cycling set of safe work instructions
+                            (review / tests / docs / ...) instead of plain "hi",
+                            pacing itself by your 5h + weekly quota headroom.
+                            Also: CWARM_AI=1, or press Ctrl+\\ anytime to toggle
+                            (state shows in the statusline; CWARM_TOGGLE_KEY=]
+                            etc. rebinds it if your IME steals the default).
+                            The toggle persists across restarts, per project;
+                            --ai / CWARM_AI=0 override the remembered state.
+                            Customize the cycle
+                            with CWARM_AI_MSG (single message) or
+                            CWARM_AI_MSG_FILE (one instruction per line, # = comment)
+                            — the built-in cycle is software-engineering oriented.
 
 Keepalive only fires after you've been idle past the cache-TTL threshold.
 The TTL is auto-detected from the transcript's cache_creation (1h cache ->
