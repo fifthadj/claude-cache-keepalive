@@ -359,10 +359,16 @@ export function clampHumanQuiet(humanQuietMs, idleThresholdS) {
 // 用來判定是否進入無人值守（≥2），但暫停期間送出的普通 "hi" 也會讓它累加——若拿它直接
 // 當循環索引，暫停後恢復會整段跳號、破壞步驟間的依賴（如「依建議執行」承接前一步的發現）。
 // 故循環位置改用呼叫端維護、只在真的敲出 AI 循環訊息時才遞增的 aiStep。
-export function pickInjectMsg({ pendingResume, consecInjects, aiStep = 0, resumeMsg, aiMsg, msg, aiAllowed = true }) {
+// briefing：每輪無人值守的第一步（aiStep===0）附加一次性說明，讓被驅動的 Claude 知道自己
+// 在被 cwarm 自動驅動、規則是什麼（見 host.mjs 的 AI_BRIEFING）；同一輪其餘步驟不重複附加。
+// 只在真的選中陣列循環的第一格時才附加——固定字串 aiMsg（CWARM_AI_MSG）或非陣列不適用。
+export function pickInjectMsg({ pendingResume, consecInjects, aiStep = 0, resumeMsg, aiMsg, msg, aiAllowed = true, briefing = null }) {
   if (pendingResume) return resumeMsg;
   if (consecInjects >= 2 && aiAllowed) {
-    if (Array.isArray(aiMsg)) return aiMsg[aiStep % aiMsg.length];
+    if (Array.isArray(aiMsg)) {
+      const step = aiMsg[aiStep % aiMsg.length];
+      return briefing && aiStep === 0 ? `${briefing} ${step}` : step;
+    }
     return aiMsg;
   }
   return msg;

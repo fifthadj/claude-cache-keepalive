@@ -437,6 +437,20 @@ test('pickInjectMsg: array aiMsg cycles the unattended workflow in order via aiS
   assert.equal(pickInjectMsg({ ...m, consecInjects: 50, aiStep: 1 }), 'critical', 'consecInjects drift does not skip steps');
 });
 
+test('pickInjectMsg: briefing prefixes only the very first step of each fresh unattended round', () => {
+  const cycle = ['review', 'critical', 'suggest'];
+  const m = { pendingResume: false, resumeMsg: 'go on', aiMsg: cycle, msg: 'hi', consecInjects: 5, briefing: 'BRIEF:' };
+  assert.equal(pickInjectMsg({ ...m, aiStep: 0 }), 'BRIEF: review', 'aiStep 0 gets the one-time briefing prepended');
+  assert.equal(pickInjectMsg({ ...m, aiStep: 1 }), 'critical', 'step 2+ in the same round: no briefing');
+  // aiStep=3 也選到 aiMsg[3%3]='review'（循環自然繞回），但這是同一輪連續無人值守中途
+  // 繞圈，不是「使用者活動歸零後的全新一輪」——不該重複附加簡報，只認真正的 aiStep===0。
+  assert.equal(pickInjectMsg({ ...m, aiStep: 3 }), 'review', 'cycle wrap mid-round ≠ fresh round: no re-briefing');
+  // 沒給 briefing（預設 null）→ 完全不影響既有行為
+  assert.equal(pickInjectMsg({ ...m, aiStep: 0, briefing: null }), 'review', 'no briefing configured → unchanged');
+  // 固定字串 aiMsg（CWARM_AI_MSG）不是陣列，briefing 不適用
+  assert.equal(pickInjectMsg({ ...m, aiMsg: 'fixed message', aiStep: 0 }), 'fixed message', 'non-array aiMsg ignores briefing');
+});
+
 // ---- AI 模式快節奏 ----
 test('aiPacing: fast pace only when unattended + quota headroom + normal state', () => {
   const base = { ttl: 3600, idleThreshold: 3480 };

@@ -177,6 +177,18 @@ export function startHost(opts = {}) {
     'Unattended: distill lessons — write the non-obvious, durable lessons from this session into project memory / CLAUDE.md so every future session benefits; skip anything already recorded.',
     'Unattended: wrap up — write a concise report of all changes and open items, plus a decision queue: questions only the user can answer, each with context, options, and your recommendation.',
   ];
+  // 無人值守循環第一步附帶一次性簡報：被驅動的 Claude 本身看不到 cwarm 的原始碼與這段機制，
+  // 光靠 "Unattended: review …" 猜不出「為什麼會收到這句」「還會不會繼續來」「額度用完會
+  // 怎樣」「使用者真的回來打字算不算數」。實際判斷（只在陣列循環剛回到第 0 步時附加一次，
+  // 不是每步都附）交給 pickInjectMsg（keepalive.mjs）——那裡才有 aiStep/aiMsg 的完整脈絡，
+  // 這裡只需把說明文字傳進去；CWARM_AI_MSG（固定一句）情境自動不適用（非陣列）。
+  const AI_BRIEFING = "Unattended: heads up — cwarm's AI mode is now driving this session on its own. "
+    + 'Whenever this terminal sits idle past a threshold with no human keystrokes, it injects one instruction '
+    + "like this automatically, cycling through a fixed checklist (review, tests, docs, refactors, …); it's not "
+    + "you deciding to keep going, it's the tool. Pace is quota-aware — faster when there's headroom, paused near "
+    + "your usage limit and resumed with a plain 'go on' once it resets. If real human input ever shows up in this "
+    + 'session, that always takes priority over anything below. Stay conservative: no deploys, no destructive '
+    + 'operations, no large new scope — verify each step before moving to the next.';
   // 使用者敲鍵後需靜默這麼久才可注入（預設 5 分鐘）。CWARM_HUMAN_QUIET_S 可調；
   // 打錯成非數字（如 "5m"）會記警告並退回預設，不會悄悄關掉這個安全機制。
   const humanQuietMs = envNumber('CWARM_HUMAN_QUIET_S', 300, LOG) * 1000;
@@ -295,7 +307,7 @@ export function startHost(opts = {}) {
       // 先送 Esc：把任何「必答」modal（權限/選單/計畫批准）收掉、退回輸入框，後面那個 Enter 才不會誤選預設項；
       // 空輸入框時 Esc 等同 no-op。隔一小段再送訊息——讓 claude 先把 modal 收乾淨，也避免 ESC 與字元被併成 Meta 鍵。
       const aiAllowed = aiEnabled && wgate !== 'off';
-      const injectMsg = pickInjectMsg({ pendingResume, consecInjects, aiStep, resumeMsg: resumeMsg(), aiMsg, msg, aiAllowed });
+      const injectMsg = pickInjectMsg({ pendingResume, consecInjects, aiStep, resumeMsg: resumeMsg(), aiMsg, msg, aiAllowed, briefing: AI_BRIEFING });
       // 只有真的敲出 AI 循環裡的一步才推進 aiStep；被 wgate='off' 等閘門擋下、退回一般
       // "hi" 或 resume 的那些發送不算，避免恢復後循環整段跳號（見上方 aiStep 宣告的說明）。
       const firedAiStep = !pendingResume && consecInjects >= 2 && aiAllowed && Array.isArray(aiMsg);
