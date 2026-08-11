@@ -106,6 +106,42 @@ export function transcriptIdleMs(claudeDir, cwd, now = Date.now(), sinceMs = nul
   return now - m;
 }
 
+// ---- 本 session transcript 針定（session bridge）----
+// 多分頁在「同一個資料夾」各開一個 session 時，上面「取 mtime 最新的 .jsonl」會抓到
+// 隔壁分頁的 transcript：只要隔壁還在活動，自己這邊的 idle 永遠算不滿門檻，保溫不發、
+// cache 冷掉（倒數走到🔴）。TTL 檔位偵測也可能讀到別人的檔。
+// 解法：只有 statusline 拿得到 Claude Code payload 的 transcript_path（session 專屬、
+// 絕對正確），由 segment.mjs 落地成 per-host 橋接檔（cwarm-session-<hostId>.json），
+// host 每 tick 讀回，從此針定自己的 transcript。hostId 由 host 產生、經 CWARM_HOST_ID
+// 環境變數傳進 pty 裡的 claude，statusline 子行程自然繼承。
+// 沒裝 statusline（未跑 cwarm setup）就沒有橋接檔 → 回退舊行為（單 session 不受影響）。
+export function sessionBridgePath(claudeDir, hostId) {
+  // hostId 進檔名前先消毒：值理論上只來自自家 host，但環境變數可被外部塞怪字元，不給路徑穿越機會。
+  return path.join(claudeDir, `cwarm-session-${String(hostId).replace(/[^a-zA-Z0-9_-]/g, '-')}.json`);
+}
+
+// 讀橋接檔取回本 session 的 transcript 路徑；hostId 空、檔案不存在、或路徑已失效 → null。
+// 不做 ts 時效檢查：檔案是本 host 專屬（hostId 每次啟動唯一），內容只會被自己 session 的
+// statusline 更新，路徑本身不會「過期」（/clear 換 session 檔時 statusline 下次刷新就改寫）。
+export function readSessionTranscript(claudeDir, hostId) {
+  if (!hostId) return null;
+  const o = readJsonSafe(sessionBridgePath(claudeDir, hostId));
+  const p = o && typeof o.transcript_path === 'string' && o.transcript_path ? o.transcript_path : null;
+  if (!p) return null;
+  try { fs.statSync(p); } catch { return null; }
+  return p;
+}
+
+// 針定版 idle：直接看指定 transcript 的 mtime，語意同 transcriptIdleMs（含 sinceMs 的
+// 「Context 0% 不保溫」檢查——resume 舊 session 未寫入前 mtime 早於啟動時刻 → null 不注入）。
+export function transcriptIdleMsAt(tpath, now = Date.now(), sinceMs = null) {
+  if (!tpath) return null;
+  let m;
+  try { m = fs.statSync(tpath).mtimeMs; } catch { return null; }
+  if (sinceMs != null && m < sinceMs) return null;
+  return now - m;
+}
+
 // 讀 transcript 尾端，判斷這個 session 實際拿到的 cache TTL 檔位。
 // 回傳 'long'(1h) / 'short'(5m) / null（找不到可判讀的 cache_creation）。
 // 為什麼讀 transcript 而非帳號方案：message.usage.cache_creation 的

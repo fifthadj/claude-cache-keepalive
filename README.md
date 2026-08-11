@@ -39,7 +39,7 @@ It's transparent — type and use claude exactly as normal (no `Ctrl-b` prefix, 
 ## How it works
 
 - **PTY host** — `cwarm` spawns `claude` inside a pseudo‑terminal it owns and transparently pipes your keyboard ↔ claude ↔ screen (and window resizes). This is the same approach tmux / expect / VS Code's terminal use, and the only robust way to inject input into a terminal program.
-- **Idle detection** — idle = time since your last **message**, measured from the newest transcript file under `~/.claude/projects/`. This is what actually governs cache age: scrolling, arrow‑key reading, or a half‑typed prompt are terminal input but don't refresh the cache, so they must *not* count as activity. (Earlier versions timed keystrokes, which let the cache go cold while you were reading.)
+- **Idle detection** — idle = time since your last **message**, measured from this session's transcript file under `~/.claude/projects/`. This is what actually governs cache age: scrolling, arrow‑key reading, or a half‑typed prompt are terminal input but don't refresh the cache, so they must *not* count as activity. (Earlier versions timed keystrokes, which let the cache go cold while you were reading.) With the statusline add‑on installed (`cwarm setup`), the host **pins its own session's transcript** via a tiny per‑session bridge file (`~/.claude/cwarm-session-<id>.json`, written from the statusline's `transcript_path`, removed on exit) — so several tabs running sessions in the *same folder* no longer confuse each other. Without the statusline it falls back to "newest transcript in this project's folder".
 - **TTL‑aware (measured, not guessed)** — the cache TTL is read straight from the transcript's `message.usage.cache_creation`, not inferred from your subscription:
   - any recent turn wrote `ephemeral_1h_input_tokens` → **1 h cache** → inject after ~58 min idle, cooldown 1 h.
   - only `ephemeral_5m_input_tokens` (or no evidence yet) → **5 min cache** (conservative) → inject after ~4 min idle, cooldown 5 min.
@@ -134,7 +134,7 @@ Environment variables (mostly for testing / advanced use):
 ## Limitations
 
 - **No detach.** Closing the window ends the session — there's no tmux‑style detach/reattach (that would mean reimplementing a terminal multiplexer; out of scope). But minimize / background / unfocused all keep working.
-- **Single session.** Designed for one `cwarm` session at a time.
+- **Concurrent sessions in the same folder need the statusline.** With the statusline add‑on installed (`cwarm setup`), each `cwarm` tab pins its own session's transcript and multiple tabs coexist cleanly — even in the same folder. Without it, two sessions in the *same* folder will read each other's transcript activity and the keepalive misfires (sessions in different folders are always fine).
 - If you walk away with a half‑typed draft and stay idle past the threshold, the keepalive's `Esc` clears the draft before sending `hi`. Rare.
 - **A genuinely blocking prompt can't be kept warm.** While Claude Code waits on a mandatory answer, no API turn can happen, so the cache may cool during that window; warming resumes automatically once you answer.
 
@@ -161,7 +161,7 @@ Environment variables (mostly for testing / advanced use):
 ### 運作原理
 
 - **PTY host**：`cwarm` 把 `claude` spawn 在一個它自己擁有的 pseudo-terminal 裡，透明地把你的鍵盤 ↔ claude ↔ 畫面（含視窗 resize）接起來。這跟 tmux／expect／VS Code 終端的做法相同，也是唯一穩健、能把輸入注入終端程式的方式。
-- **閒置偵測**：閒置＝距你上次**訊息**多久，量自 `~/.claude/projects/` 底下最新的 transcript 檔。這才是決定 cache 年齡的訊號——捲動、用方向鍵讀、打到一半沒送出，都是終端輸入但不會刷新 cache，所以不該算成活動。（早期版本計時鍵盤輸入，會讓你在閱讀時 cache 冷掉。）
+- **閒置偵測**：閒置＝距你上次**訊息**多久，量自 `~/.claude/projects/` 底下本 session 的 transcript 檔。這才是決定 cache 年齡的訊號——捲動、用方向鍵讀、打到一半沒送出，都是終端輸入但不會刷新 cache，所以不該算成活動。（早期版本計時鍵盤輸入，會讓你在閱讀時 cache 冷掉。）裝了 statusline 附加元件（`cwarm setup`）後，host 會透過一個極小的 per-session 橋接檔（`~/.claude/cwarm-session-<id>.json`，由 statusline 的 `transcript_path` 落地、退出時自動刪除）**針定自己 session 的 transcript**——多個分頁在**同一個資料夾**各開 session 也不會互相干擾。沒裝 statusline 則回退「本專案資料夾裡最新的 transcript」猜法。
 - **TTL 感知（實測，非猜測）**：cache TTL 直接讀自 transcript 的 `message.usage.cache_creation`，不從訂閱方案推斷——最近有寫 `ephemeral_1h_input_tokens` → 1h cache（閒置約 58 分才注入、冷卻 1h）；只有 `ephemeral_5m_input_tokens`（或還沒證據）→ 5m cache（保守，約 4 分注入、冷卻 5m）。這能撐過 client 版本、環境變數、伺服器旗標的變動（例如 Pro 帳號也可能拿到 1h cache）。
 - **提示安全注入**：keepalive 只在 PTY **靜止一小段時間後**才觸發（`CWARM_QUIET_MS`，預設 2.5 秒）。必答提示（工具權限、`AskUserQuestion`、計畫批准）的 spinner 會一直動，忙著跑工具時也持續輸出，兩者都「不安靜」，所以 keepalive 不會送進去（不會誤選選單預設項、也不會打斷長工具執行）。而且注入時會**先送 `Esc`** 退回輸入框，那個 Enter 永遠落不到提示上。（提示真的卡住時 cache 本來就無法保溫，等你回答後會自動恢復。）
 - **與焦點／縮小無關**：注入是行程內部的 `pty.write`，跟視窗狀態無關。只有關閉視窗（結束 host 行程）才會停。
@@ -240,6 +240,10 @@ CWARM_AI=1 cwarm        # 效果相同，走環境變數
 - **macOS**：同樣的跨平台機制（node-pty ＋ 你 shell 裡的 `claude`）；預期可用，尚未實測，歡迎回報。
 
 ## Changelog
+
+### 0.1.13
+- **Fix:** running multiple Claude Code sessions in tabs **in the same folder** no longer corrupts each other's keepalive timing. The host used to measure idle from the *newest* transcript in the project folder — with a busier sibling session next door, its own idle never crossed the threshold, the keepalive never fired, and the cache countdown ran cold (🔴). Now the statusline lands each session's exact `transcript_path` into a per‑session bridge file (`~/.claude/cwarm-session-<id>.json`, keyed by a `CWARM_HOST_ID` the host passes through the PTY environment), and the host pins idle *and* TTL‑regime detection to its own transcript. Bridge files are deleted on exit; stale orphans (crashes) are swept on startup. Without the statusline installed, behavior falls back to the previous folder‑newest heuristic.
+- **修正：** 用分頁在**同一個資料夾**開多個 Claude Code session 時，保溫計時不再互相干擾。過去 host 是拿專案資料夾裡 *mtime 最新* 的 transcript 判閒置——隔壁分頁還在活動時，自己的閒置永遠算不滿門檻、keepalive 不發、cache 倒數一路走到冷掉（🔴）。現在 statusline 會把每個 session 精確的 `transcript_path` 落地成 per-session 橋接檔（`~/.claude/cwarm-session-<id>.json`，以 host 經 PTY 環境變數傳入的 `CWARM_HOST_ID` 為鍵），host 的閒置判定**與 TTL 檔位偵測**都針定自己的 transcript。橋接檔退出時自動刪除；crash 留下的孤兒檔啟動時順手清掉。沒裝 statusline 時回退原本「資料夾最新」的猜法。
 
 ### 0.1.12
 - **Feature:** each fresh unattended stretch now opens with a one-time **briefing message** — the first checklist step of a new round (after human activity resets the cycle) is prefixed with a short explanation telling Claude that cwarm's AI mode is driving, why it's receiving instructions with no request from the user, how the quota pacing works, that a real human message always overrides it, and the built-in safety bounds. Mid-cycle wraparounds within the same unattended stretch don't repeat it. Implemented as a pure, tested `pickInjectMsg` option — no duplicated logic in the host loop.

@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { defaultClaudeDir, readTtlRegime, regimeParams, billingModeFromSources, accountInfoFromSources, readAuthSources, usageState, usageBridgePath, readAiState } from '../keepalive.mjs';
+import { defaultClaudeDir, readTtlRegime, regimeParams, billingModeFromSources, accountInfoFromSources, readAuthSources, usageState, usageBridgePath, readAiState, sessionBridgePath } from '../keepalive.mjs';
 
 const claudeDir = defaultClaudeDir();
 const ORIG = path.join(claudeDir, 'cwarm-statusline-orig.json');
@@ -105,6 +105,17 @@ function minimalBase(payload) {
 const raw = readStdin();
 let payload = {};
 try { payload = JSON.parse(raw); } catch { /* 空/壞就用空物件 */ }
+
+// 本 session transcript 落地給 host（session bridge）：payload 的 transcript_path 是
+// session 專屬的正確值，host 端只能猜「資料夾裡最新的 .jsonl」——多分頁同資料夾時會
+// 猜到隔壁 session、保溫失準。host 產生的 CWARM_HOST_ID 經 pty 環境變數傳到這裡；
+// 沒有這個變數代表這個 session 不是 cwarm 帶起來的（純 claude），不落地。
+if (process.env.CWARM_HOST_ID && payload?.transcript_path) {
+  try {
+    fs.writeFileSync(sessionBridgePath(claudeDir, process.env.CWARM_HOST_ID),
+      JSON.stringify({ transcript_path: payload.transcript_path, ts: Date.now() }));
+  } catch { /* 落地失敗不影響顯示 */ }
+}
 
 const cwd = payloadCwd(payload);
 const seg = cacheSegment(payload);

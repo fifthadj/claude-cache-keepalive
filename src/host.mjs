@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { defaultClaudeDir, regimeParams, detectTtlRegime, decideInject, transcriptIdleMs, looksLikeTrustPrompt, detectBillingMode, readUsageBridge, usageState, looksLikeHumanInput, pickInjectMsg, aiPacing, weeklyGate, readAiMsgFile, aiStatePath, extractAiToggle, clampHumanQuiet, toggleKeySpec, readAiState, initialAiEnabled } from './keepalive.mjs';
+import { defaultClaudeDir, regimeParams, detectTtlRegime, decideInject, transcriptIdleMs, looksLikeTrustPrompt, detectBillingMode, readUsageBridge, usageState, looksLikeHumanInput, pickInjectMsg, aiPacing, weeklyGate, readAiMsgFile, aiStatePath, extractAiToggle, clampHumanQuiet, toggleKeySpec, readAiState, initialAiEnabled, sessionBridgePath, readSessionTranscript, readTtlRegime, transcriptIdleMsAt } from './keepalive.mjs';
 
 const require = createRequire(import.meta.url);
 const isWin = process.platform === 'win32';
@@ -57,12 +57,29 @@ export function startHost(opts = {}) {
   // 固定取一次 cwd，全程共用（host 不會 chdir）：writeAiState/usage bridge/transcript 查找
   // 都用同一個值，避免不同時間點呼叫 process.cwd() 理論上不一致、間接影響 cwdKey 對應。
   const hostCwd = process.cwd();
+  // session bridge 用的 host 識別碼：pid+啟動時刻，每次啟動唯一。經環境變數傳進 pty 裡的
+  // claude，statusline 子行程繼承後把本 session 的 transcript_path 落地成
+  // cwarm-session-<hostId>.json，host 讀回即可針定自己的 transcript——多分頁在同一個
+  // 資料夾各開 session 時，不再誤拿「資料夾裡最新的 .jsonl」（可能是隔壁 session 的）。
+  const hostId = `${process.pid.toString(36)}-${Date.now().toString(36)}`;
+  // 孤兒橋接檔清理：host 正常退出會刪掉自己那份，但 crash / 斷電會留下殘檔，啟動時
+  // 順手清掉太舊的（>7 天，肯定不會再有 host 認領）。
+  try {
+    for (const name of fs.readdirSync(claudeDir)) {
+      if (!/^cwarm-session-.*\.json$/.test(name)) continue;
+      const p = path.join(claudeDir, name);
+      try {
+        const o = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (o == null || o.ts == null || Date.now() - o.ts > 7 * 86_400_000) fs.unlinkSync(p);
+      } catch { try { fs.unlinkSync(p); } catch {} }
+    }
+  } catch { /* claudeDir 讀不到就算了 */ }
   const ptyProc = pty.spawn(file, spawnArgs, {
     name: process.env.TERM || 'xterm-256color',
     cols: process.stdout.columns || 80,
     rows: process.stdout.rows || 24,
     cwd: hostCwd,
-    env: process.env,
+    env: { ...process.env, CWARM_HOST_ID: hostId },
   });
 
   // ---- 透明 I/O 多工 ----
@@ -259,7 +276,12 @@ export function startHost(opts = {}) {
       pendingResume = true; // 視窗已重置：下一發改敲 resumeMsg，回溫 cache 兼續跑被打斷的任務
       try { fs.appendFileSync(LOG, `${new Date().toISOString()} window reset — next inject will send "${resumeMsg()}"\n`); } catch {}
     }
-    const regime = detectTtlRegime(claudeDir, hostCwd);        // 從 transcript 實測 1h/5m，不再猜方案
+    // session bridge 有落地時針定本 session 的 transcript（多分頁同資料夾不互相干擾）；
+    // 沒有（未跑 cwarm setup 裝 statusline、或 payload 還沒刷新過）回退舊的「資料夾最新」猜法。
+    const ownTranscript = readSessionTranscript(claudeDir, hostId);
+    const regime = ownTranscript
+      ? readTtlRegime(ownTranscript)                           // 從自己 session 的 transcript 實測 1h/5m
+      : detectTtlRegime(claudeDir, hostCwd);                   // 回退：資料夾內最新 transcript
     // 週配速：7 天視窗以日均（100/7 ≈ 14.3%/天）攤出進度線，ok=可快跑、slow=退回
     // 一個 TTL 一步、off=超線一天日均以上 → 暫停 AI 工作只剩純保溫 "hi"。
     const wgate = weeklyGate({
@@ -280,7 +302,9 @@ export function startHost(opts = {}) {
       fastMaxPct: envNumber('CWARM_AI_FAST_PCT', 70, LOG),
     });
     const now = Date.now();
-    const idleMs = transcriptIdleMs(claudeDir, hostCwd, now, startedMs);
+    const idleMs = ownTranscript
+      ? transcriptIdleMsAt(ownTranscript, now, startedMs)
+      : transcriptIdleMs(claudeDir, hostCwd, now, startedMs);
     // idleMs 找不到 transcript 時保溫整個靜默失效，且原本沒有任何提示——啟動超過 2 分鐘
     // （早期本來就會是 null，Context 0% 正常現象，不必吵）仍找不到才警告一次，提示可能是
     // cwd 與 Claude Code 建立的 transcript 資料夾對不上（磁碟代號大小寫、junction 等）。
@@ -337,6 +361,7 @@ export function startHost(opts = {}) {
     if (exiting) return;
     exiting = true;
     clearInterval(timer);
+    try { fs.unlinkSync(sessionBridgePath(claudeDir, hostId)); } catch {} // 自己的 session bridge 檔用完即刪
     try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch {}
     try { process.stdin.pause(); } catch {}
     try { process.stdout.write(RESET, () => process.exit(code)); }
@@ -352,6 +377,7 @@ export function startHost(opts = {}) {
   process.on('SIGHUP', () => shutdown(0));
   // 任何路徑退出都殺掉 pty，並盡力（同步）還原終端，作為最後保險。
   process.on('exit', () => {
+    try { fs.unlinkSync(sessionBridgePath(claudeDir, hostId)); } catch {} // shutdown 沒走到時的最後保險
     try { ptyProc.kill(); } catch {}
     try { if (process.stdin.isTTY) process.stdin.setRawMode(false); } catch {}
     try { process.stdout.write(RESET); } catch {}

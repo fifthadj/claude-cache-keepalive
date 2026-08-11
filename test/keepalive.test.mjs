@@ -12,7 +12,7 @@ import {
   usageState, readUsageBridge, usageBridgePath,
   looksLikeHumanInput, pickInjectMsg, aiPacing, weeklyGate, readAiMsgFile,
   aiStatePath, readAiState, extractAiToggle, clampHumanQuiet, readAuthSources, toggleKeySpec,
-  initialAiEnabled,
+  initialAiEnabled, sessionBridgePath, readSessionTranscript, transcriptIdleMsAt,
 } from '../src/keepalive.mjs';
 
 const NOW = 1_000_000_000_000;
@@ -671,5 +671,68 @@ test('detectTtlRegime: locates the cwd transcript and reads its regime', () => {
     asst({ ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 5000 }) + '\n');
   assert.equal(detectTtlRegime(dir, cwd), 'long');
   assert.equal(typeof transcriptPath(dir, cwd), 'string');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ---- session bridge（多分頁同資料夾並行的 transcript 針定）----
+// Bug 情境：兩個分頁在同一個資料夾各開一個 session，host 拿「資料夾裡 mtime 最新的
+// .jsonl」判 idle，會抓到隔壁分頁的 transcript——隔壁還在活動，自己永遠算不滿門檻、
+// 保溫不發、cache 冷掉。修法：statusline 把 payload 的 transcript_path 落地成
+// per-host 橋接檔，host 針定自己的 transcript。
+test('sessionBridgePath: hostId is sanitized before landing in the filename', () => {
+  const p = sessionBridgePath('C:\home\.claude', '..\..\evil/../x');
+  assert.equal(path.dirname(p), 'C:\home\.claude', 'stays inside claudeDir');
+  assert.match(path.basename(p), /^cwarm-session-[a-zA-Z0-9_-]+\.json$/);
+});
+
+test('readSessionTranscript: returns the bridged path only when it exists', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-sb-'));
+  const t = path.join(dir, 'session.jsonl');
+  fs.writeFileSync(t, '{}\n');
+  fs.writeFileSync(sessionBridgePath(dir, 'h1'), JSON.stringify({ transcript_path: t, ts: Date.now() }));
+  assert.equal(readSessionTranscript(dir, 'h1'), t);
+  assert.equal(readSessionTranscript(dir, null), null, 'no hostId → null');
+  assert.equal(readSessionTranscript(dir, 'h2'), null, 'no bridge file → null');
+  fs.writeFileSync(sessionBridgePath(dir, 'h3'), JSON.stringify({ transcript_path: path.join(dir, 'gone.jsonl'), ts: Date.now() }));
+  assert.equal(readSessionTranscript(dir, 'h3'), null, 'bridged path no longer exists → null');
+  fs.writeFileSync(sessionBridgePath(dir, 'h4'), 'not-json');
+  assert.equal(readSessionTranscript(dir, 'h4'), null, 'corrupt bridge file → null');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('transcriptIdleMsAt: pinned-file idle with the same sinceMs semantics', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-sa-'));
+  const t = path.join(dir, 'session.jsonl');
+  fs.writeFileSync(t, '{}\n');
+  const m = fs.statSync(t).mtimeMs;
+  assert.equal(transcriptIdleMsAt(t, m + 5000), 5000);
+  assert.equal(transcriptIdleMsAt(t, m + 5000, m - 1000), 5000, 'mtime after sinceMs counts');
+  assert.equal(transcriptIdleMsAt(t, m + 5000, m + 1000), null, 'mtime before sinceMs → null (Context 0% rule)');
+  assert.equal(transcriptIdleMsAt(path.join(dir, 'gone.jsonl'), m), null, 'missing file → null');
+  assert.equal(transcriptIdleMsAt(null, m), null, 'no path → null');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('regression: a busier sibling transcript in the same project dir no longer masks our idle', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cwarm-sr-'));
+  const cwd = 'C:\proj\tabs';
+  const pdir = path.join(dir, 'projects', encodeProjectDir(cwd));
+  fs.mkdirSync(pdir, { recursive: true });
+  const ours = path.join(pdir, 'ours.jsonl');
+  const theirs = path.join(pdir, 'theirs.jsonl');
+  fs.writeFileSync(ours, '{}\n');
+  fs.writeFileSync(theirs, '{}\n');
+  const started = fs.statSync(ours).mtimeMs - 10_000;
+  // 我們的 session 已閒置 10 分鐘；隔壁分頁 5 秒前才動過。
+  const ourM = fs.statSync(ours).mtimeMs;
+  fs.utimesSync(theirs, new Date(ourM + 595_000), new Date(ourM + 595_000));
+  const now = ourM + 600_000;
+  // mtime 實際落地帶檔案系統精度誤差（次毫秒～毫秒級），比對用容差
+  const folderGuess = transcriptIdleMs(dir, cwd, now, started);
+  assert.ok(Math.abs(folderGuess - 5000) < 100, `old folder-newest heuristic reports the neighbour's ~5s idle (the bug), got ${folderGuess}`);
+  fs.writeFileSync(sessionBridgePath(dir, 'me'), JSON.stringify({ transcript_path: ours, ts: now }));
+  const pinned = readSessionTranscript(dir, 'me');
+  const pinnedIdle = transcriptIdleMsAt(pinned, now, started);
+  assert.ok(Math.abs(pinnedIdle - 600_000) < 100, `pinned transcript reports our real ~10min idle, got ${pinnedIdle}`);
   fs.rmSync(dir, { recursive: true, force: true });
 });
