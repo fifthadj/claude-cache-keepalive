@@ -64,6 +64,19 @@ cwarm setup --remove   # restores your previous statusline
 
 (Written in Node — no Python dependency, no Windows codepage issues.)
 
+### Quota segments
+
+Once you run `cwarm setup`, the statusline also surfaces two quota warnings sourced straight from Claude Code's own `rate_limits` payload — no extra config needed:
+
+```
+⚠️ 96%、離reset還2h，建議暫停 │ 🔴 週超前15.0%，剩3.5d均10.0%/天，休息21.8h回綠
+```
+
+- **5-hour window** — once usage crosses 95% *and* the reset is still more than an hour away, an `⚠️ NN%、離reset還Nh，建議暫停` warning appears suggesting you pause. Nothing shows below 95%, or once you're within an hour of reset (the tail is going to burn either way).
+- **7-day window** — a colored ball tracks how far ahead of a straight-line pace budget (100%/7 ≈ 14.3%/day) you're running: 🟢 under 2 points ahead (or behind), a quiet 2-3 point gap with no ball, 🟡 3-5, 🟠 6-8, 🩷 9-11 (no pink circle emoji exists, so it borrows the pink heart), 🔴 12+. Next to the ball: how many days are left in the window, the average %/day you can still spend if usage stays flat for the rest of it, and — once you're more than 2 points ahead — how long you'd need to rest (no further usage) before the pace line catches up and the ball turns green again.
+
+Both segments are pure display; they never stop the keepalive from firing. `--ai` mode reads the same underlying numbers to actually throttle itself (see below).
+
 ## Unattended AI mode (opt-in, off by default)
 
 Plain keepalive only sends `hi` — harmless, but it doesn't make idle time *useful*. `--ai` mode does: once cwarm decides you've genuinely stepped away, instead of `hi` it starts feeding Claude a repeating checklist of safe, self-verifying work (review the session, sweep for TODOs, add missing tests, sync docs, distill lessons into memory, …), so idle windows turn into progress instead of dead air.
@@ -158,6 +171,19 @@ Environment variables (mostly for testing / advanced use):
 - **選配 statusline**（顯示 `♻️ cache 58m12s` 倒數；會先備份、包裝既有 statusline、可一鍵還原）：`cwarm setup` / `cwarm setup --remove`
 - **限制**：不能 detach（關視窗＝結束，但縮小／背景照常保溫）。
 
+### 額度段位（statusline）
+
+裝了 `cwarm setup` 之後，statusline 會直接從 Claude Code 自帶的 `rate_limits` payload 秀出兩段額度提醒，不用額外設定：
+
+```
+⚠️ 96%、離reset還2h，建議暫停 │ 🔴 週超前15.0%，剩3.5d均10.0%/天，休息21.8h回綠
+```
+
+- **5 小時視窗**：用量超過 95% 且離 reset 還超過 1 小時，才會出現 `⚠️ NN%、離reset還Nh，建議暫停`；不到 95%、或已經進入最後一小時（尾巴額度反正燒到撞牆），都不顯示。
+- **7 天視窗**：用一顆彩色球表示「超前按時間比例均攤的日均進度線（100%/7 ≈ 14.3%/天）多少個百分點」：不到 2 個百分點（含落後）是 🟢，2~3 之間留白不顯示，3~5 是 🟡，6~8 是 🟠，9~11 是 🩷（Unicode 沒有粉紅圓形，借粉紅愛心最接近），12 以上是 🔴。球旁邊接著顯示視窗還剩幾天、照這剩餘天數均攤接下來每天還能燒多少 %，以及——只要超前 2 個百分點以上——要「休息」（不再新增用量）多久，進度線才會爬上來讓球回綠。
+
+這兩段都只是顯示，不會擋掉保溫注入；`--ai` 模式才是拿同一組數字真的去踩剎車（見下方）。
+
 ### 運作原理
 
 - **PTY host**：`cwarm` 把 `claude` spawn 在一個它自己擁有的 pseudo-terminal 裡，透明地把你的鍵盤 ↔ claude ↔ 畫面（含視窗 resize）接起來。這跟 tmux／expect／VS Code 終端的做法相同，也是唯一穩健、能把輸入注入終端程式的方式。
@@ -240,6 +266,10 @@ CWARM_AI=1 cwarm        # 效果相同，走環境變數
 - **macOS**：同樣的跨平台機制（node-pty ＋ 你 shell 裡的 `claude`）；預期可用，尚未實測，歡迎回報。
 
 ## Changelog
+
+### 0.1.14
+- **Feature:** the statusline's 7-day quota warning is now a real pace gauge, not just a raw number. A colored ball shows how far ahead of a straight-line pace budget (100%/7 ≈ 14.3%/day) you're running — 🟢 under 2pt ahead, 🟡 3-5pt, 🟠 6-8pt, 🩷 9-11pt, 🔴 12pt+ — alongside how many days are left in the window, the average %/day you can still spend at that pace, and (once you're 2pt+ ahead) how long you'd need to rest before the ball turns green again. See the new "Quota segments" section above.
+- **功能：** statusline 的 7 天額度提醒從一個原始數字變成真正的配速計。彩色球顯示超前「按時間比例均攤」的日均進度線（100%/7 ≈ 14.3%/天）多少個百分點——🟢 不到 2pt、🟡 3~5pt、🟠 6~8pt、🩷 9~11pt、🔴 12pt+——旁邊接著顯示視窗剩幾天、照這個配速接下來每天還能燒多少 %，以及（超前 2pt 以上時）要休息多久球才會回綠。詳見上方新增的「額度段位（statusline）」章節。
 
 ### 0.1.13
 - **Fix:** running multiple Claude Code sessions in tabs **in the same folder** no longer corrupts each other's keepalive timing. The host used to measure idle from the *newest* transcript in the project folder — with a busier sibling session next door, its own idle never crossed the threshold, the keepalive never fired, and the cache countdown ran cold (🔴). Now the statusline lands each session's exact `transcript_path` into a per‑session bridge file (`~/.claude/cwarm-session-<id>.json`, keyed by a `CWARM_HOST_ID` the host passes through the PTY environment), and the host pins idle *and* TTL‑regime detection to its own transcript. Bridge files are deleted on exit; stale orphans (crashes) are swept on startup. Without the statusline installed, behavior falls back to the previous folder‑newest heuristic.

@@ -10,7 +10,7 @@ import {
   billingModeFromSources, detectBillingMode,
   accountInfoFromSources, detectAccountInfo,
   usageState, readUsageBridge, usageBridgePath,
-  looksLikeHumanInput, pickInjectMsg, aiPacing, weeklyGate, readAiMsgFile,
+  looksLikeHumanInput, pickInjectMsg, aiPacing, weeklyGate, weeklyPaceInfo, readAiMsgFile,
   aiStatePath, readAiState, extractAiToggle, clampHumanQuiet, readAuthSources, toggleKeySpec,
   initialAiEnabled, sessionBridgePath, readSessionTranscript, transcriptIdleMsAt,
 } from '../src/keepalive.mjs';
@@ -225,6 +225,40 @@ test('weeklyGate: pro-rata pacing line with one-day grace', () => {
   // 缺資料 → unknown
   assert.equal(weeklyGate({ usedPct: null, resetsAt: t0, nowSec: midWeek }), 'unknown');
   assert.equal(weeklyGate({ usedPct: 50, resetsAt: null, nowSec: midWeek }), 'unknown');
+});
+
+test('weeklyPaceInfo: ball color steps by how far ahead of the pro-rata line, plus daily budget for the rest of the window', () => {
+  const WEEK = 7 * 86400;
+  const t0 = 2_000_000_000;
+  const midWeek = t0 - WEEK / 2; // 進度線 = 50%，剩餘天數 = 3.5d
+  assert.equal(weeklyPaceInfo({ usedPct: 51, resetsAt: t0, nowSec: midWeek }).ball, '\u{1F7E2}', '<2pt ahead → green');
+  assert.equal(weeklyPaceInfo({ usedPct: 45, resetsAt: t0, nowSec: midWeek }).ball, '\u{1F7E2}', 'behind the line is also green');
+  assert.equal(weeklyPaceInfo({ usedPct: 52.5, resetsAt: t0, nowSec: midWeek }), null, '2~3pt gap — quiet, no ball');
+  assert.equal(weeklyPaceInfo({ usedPct: 54, resetsAt: t0, nowSec: midWeek }).ball, '\u{1F7E1}', '3~5pt → yellow');
+  assert.equal(weeklyPaceInfo({ usedPct: 57, resetsAt: t0, nowSec: midWeek }).ball, '\u{1F7E0}', '6~8pt → orange');
+  assert.equal(weeklyPaceInfo({ usedPct: 60, resetsAt: t0, nowSec: midWeek }).ball, '\u{1FA77}', '9~11pt → pink');
+  const red = weeklyPaceInfo({ usedPct: 65, resetsAt: t0, nowSec: midWeek });
+  assert.equal(red.ball, '\u{1F534}', '>=12pt → red');
+  assert.ok(Math.abs(red.excess - 15) < 1e-9);
+  assert.ok(Math.abs(red.daysRemaining - 3.5) < 1e-9);
+  assert.ok(Math.abs(red.avgPerDayRemaining - 10) < 1e-9, '(100-65)% over 3.5 remaining days = 10%/day');
+  // 缺資料 → null
+  assert.equal(weeklyPaceInfo({ usedPct: null, resetsAt: t0, nowSec: midWeek }), null);
+  assert.equal(weeklyPaceInfo({ usedPct: 60, resetsAt: null, nowSec: midWeek }), null);
+});
+
+test('weeklyPaceInfo: recoverySec — how long to rest (no more usage) before the ball turns green again', () => {
+  const WEEK = 7 * 86400;
+  const t0 = 2_000_000_000;
+  const midWeek = t0 - WEEK / 2;
+  // 已經是綠球 → 0
+  assert.equal(weeklyPaceInfo({ usedPct: 51, resetsAt: t0, nowSec: midWeek }).recoverySec, 0);
+  // excess=15pt，進度線爬速 100/WEEK %/s，回綠（<2pt）需要 (15-2)*WEEK/100 秒
+  const red = weeklyPaceInfo({ usedPct: 65, resetsAt: t0, nowSec: midWeek });
+  assert.ok(Math.abs(red.recoverySec - (13 * WEEK) / 100) < 1e-6);
+  // 需要的休息時間超過視窗剩餘時間 → 鉗在剩餘時間（reset 一到必定回綠）
+  const capped = weeklyPaceInfo({ usedPct: 110, resetsAt: t0, nowSec: midWeek });
+  assert.ok(Math.abs(capped.recoverySec - WEEK / 2) < 1e-6, 'capped at remaining window time');
 });
 
 test('aiPacing: weekly slow/off blocks fast pace, ok/unknown allows it', () => {

@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { defaultClaudeDir, readTtlRegime, regimeParams, billingModeFromSources, accountInfoFromSources, readAuthSources, usageState, usageBridgePath, readAiState, sessionBridgePath } from '../keepalive.mjs';
+import { defaultClaudeDir, readTtlRegime, regimeParams, billingModeFromSources, accountInfoFromSources, readAuthSources, usageState, usageBridgePath, readAiState, sessionBridgePath, weeklyPaceInfo } from '../keepalive.mjs';
 
 const claudeDir = defaultClaudeDir();
 const ORIG = path.join(claudeDir, 'cwarm-statusline-orig.json');
@@ -51,8 +51,11 @@ function payloadCwd(payload) {
 // 額度橋接 + 提醒段：host（保溫迴圈）收不到 statusline payload，這裡把 rate_limits.five_hour
 // 落地成 per-cwd 橋接檔給 host 讀（撞牆偵測與 reset 後改敲 "go on" 都靠它）——不同帳號/
 // 專案的並行 session 各寫各的，不會互相覆蓋彼此的額度視窗。
-// 回傳提醒文字：用量 ≥95% 且離 reset 還超過 1 小時 → 建議使用者暫時中斷（接在 cache 倒數之後）；
-// 不滿 1 小時就不提醒，尾巴額度照常燒到撞牆。
+// 回傳提醒文字（可能兩段用 │ 接起來）：
+//   5h  — 用量 ≥95% 且離 reset 還超過 1 小時 → 建議使用者暫時中斷；不滿 1 小時就不提醒，
+//         尾巴額度照常燒到撞牆。
+//   週  — weeklyPaceInfo 依超前「按時間比例均攤」進度線幾個百分點顯示球號（<2🟢/3~5🟡/
+//         6~8🟠/9~11🩷/≥12🔴，2~3% 留白），並附上剩餘天數的日均可用量。
 function usageBridgeAndWarn(payload, cwd) {
   const fh = payload?.rate_limits?.five_hour;
   if (!fh || typeof fh !== 'object') return '';
@@ -69,9 +72,25 @@ function usageBridgeAndWarn(payload, cwd) {
       }));
     } catch { /* 落地失敗不影響顯示 */ }
   }
-  if (usageState({ usedPct, resetsAt, nowSec: Date.now() / 1000 }) !== 'warn') return '';
-  const hLeft = Math.round((resetsAt - Date.now() / 1000) / 3600);
-  return `⚠️ ${Math.round(usedPct)}%、離reset還${hLeft}h，建議暫停`; // ⚠️ NN%、離reset還Nh，建議暫停
+  const nowSec = Date.now() / 1000;
+  const parts = [];
+  if (usageState({ usedPct, resetsAt, nowSec }) === 'warn') {
+    const hLeft = Math.round((resetsAt - nowSec) / 3600);
+    parts.push(`⚠️ ${Math.round(usedPct)}%、離reset還${hLeft}h，建議暫停`); // ⚠️ NN%、離reset還Nh，建議暫停
+  }
+  const wp = weeklyPaceInfo({ usedPct: sd?.used_percentage ?? null, resetsAt: sd?.resets_at ?? null, nowSec });
+  if (wp) {
+    // 球 週超前X.X%，剩N.Nd均M.M%/天（，休息H.Hh回綠）：X 是超出「按時間比例均攤」
+    // 進度線的百分點，均M.M%/天是把剩餘額度攤到視窗剩餘天數後接下來每天還能燒多少，
+    // 休息段只在非綠球時出現——不再新增用量、單純等進度線爬上來要等多久才回綠球。
+    let text = `${wp.ball} 週超前${wp.excess.toFixed(1)}%，剩${wp.daysRemaining.toFixed(1)}d均${wp.avgPerDayRemaining.toFixed(1)}%/天`;
+    if (wp.recoverySec > 0) {
+      const h = wp.recoverySec / 3600;
+      text += h >= 24 ? `，休息${(h / 24).toFixed(1)}d回綠` : `，休息${h.toFixed(1)}h回綠`;
+    }
+    parts.push(text);
+  }
+  return parts.join(' │ ');
 }
 
 // AI 模式開關段：顯示無人值守 AI 模式 on/off 與切換熱鍵。狀態檔以 cwd 編碼命名

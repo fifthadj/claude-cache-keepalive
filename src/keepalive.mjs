@@ -313,6 +313,40 @@ export function weeklyGate({ usedPct, resetsAt, nowSec, graceDays = 1 } = {}) {
   return 'ok';
 }
 
+// ---- 週配速具現化（給人看的球號 + 剩餘天數均可用量）----
+// weeklyGate 只吐三檔給 aiPacing 悄悄降速，人完全看不到；這裡把「超前進度線多少」
+// 換算成球色：
+//   <2% 🟢（配速正常）／3~5% 🟡／6~8% 🟠／9~11% 🩷（Unicode 無粉紅圓形，借粉紅
+//   愛心最接近）／≥12% 🔴。2~3% 之間留白不顯示球（維持安靜，避免在正常/警示邊界
+//   上抖動）。
+// avgPerDayRemaining：把剩餘額度 (100-usedPct) 均攤到視窗剩餘天數，讓使用者知道
+// 「接下來每天還能燒多少」而不是只看到一個抽象的超前百分點。
+// recoverySec：不再新增用量的前提下，進度線每秒自然爬升 100/WEEK% ——excess 會跟著
+// 等速下降，算出降到 <2%（回綠球門檻）還要「休息」幾秒；已經是綠球則為 0。算出來若
+// 超過視窗剩餘時間，代表撐到 reset 都回不了綠，直接鉗在剩餘時間（reset 一到整組歸零，
+// 保證回綠）。
+export function weeklyPaceInfo({ usedPct, resetsAt, nowSec } = {}) {
+  if (usedPct == null || resetsAt == null) return null;
+  const WEEK = 7 * 86400;
+  const elapsed = Math.min(Math.max(nowSec - (resetsAt - WEEK), 0), WEEK);
+  const expectedPct = (elapsed / WEEK) * 100;
+  const excess = usedPct - expectedPct;
+  let ball = null;
+  if (excess >= 12) ball = '\u{1F534}'; // 🔴
+  else if (excess >= 9) ball = '\u{1FA77}'; // 🩷
+  else if (excess >= 6) ball = '\u{1F7E0}'; // 🟠
+  else if (excess >= 3) ball = '\u{1F7E1}'; // 🟡
+  else if (excess < 2) ball = '\u{1F7E2}'; // 🟢
+  if (!ball) return null;
+  const daysRemaining = Math.max(WEEK - elapsed, 0) / 86400;
+  const remainingPct = Math.max(100 - usedPct, 0);
+  const avgPerDayRemaining = daysRemaining > 0 ? remainingPct / daysRemaining : 0;
+  const remainingSec = Math.max(WEEK - elapsed, 0);
+  const rate = 100 / WEEK; // %/秒，進度線自然爬升速度
+  const recoverySec = excess > 2 ? Math.min((excess - 2) / rate, remainingSec) : 0;
+  return { ball, excess, daysRemaining, avgPerDayRemaining, recoverySec };
+}
+
 // ---- 無人值守 AI 模式 ----
 // 連續兩次注入之間完全沒有人為鍵盤輸入 → 判定無人值守，第三發起改敲「能與 AI 互動」
 // 的訊息（續推任務/回報進度），而不是傻傻的 "hi"；使用者一敲鍵就歸零回到 "hi"。
